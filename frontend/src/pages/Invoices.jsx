@@ -34,7 +34,11 @@ export default function Invoices() {
 
   function setFilter(key, value) {
     const next = new URLSearchParams(params)
-    value ? next.set(key, value) : next.delete(key)
+    if (value) {
+      next.set(key, value)
+    } else {
+      next.delete(key)
+    }
     setParams(next)
   }
 

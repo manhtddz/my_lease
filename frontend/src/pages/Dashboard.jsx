@@ -80,7 +80,7 @@ export default function Dashboard() {
           <h2 className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">{building}</h2>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {list.map((room) => (
-              <RoomCard key={room.id} room={room} period={currentPeriod} />
+              <RoomCard key={room.id} room={room} />
             ))}
           </div>
         </section>
@@ -98,7 +98,7 @@ function Stat({ label, value, tone }) {
   )
 }
 
-function RoomCard({ room, period: p }) {
+function RoomCard({ room }) {
   const occupied = room.status === '2'
 
   return (
