@@ -6,7 +6,8 @@ import { date, money, moneyd, num, period } from '../lib/format'
 import { Badge, ErrorBox, INVOICE_TONE, Spinner, useToast } from '../components/ui'
 import { useConfirm } from '../components/confirm'
 import PaymentModal from '../components/PaymentModal'
-import { check, compact, notNegative, required } from '../lib/validate'
+import { check, compact, max, notNegative, required } from '../lib/validate'
+import { msg } from '../lib/messages'
 
 const STATUS_LABEL = { 1: 'Nháp', 2: 'Đã phát hành', 3: 'Trả một phần', 4: 'Đã trả đủ', 5: 'Đã huỷ' }
 const METHOD_LABEL = { 1: 'Tiền mặt', 2: 'Chuyển khoản', 3: 'Khác' }
@@ -53,17 +54,17 @@ export default function InvoiceDetail() {
     const errors = {}
 
     draftLines.forEach((line) => {
-      const qtyError = check('Số lượng', line.quantity, [required, notNegative])
-      const priceError = check('Đơn giá', line.unit_price, [required, notNegative])
+      const qtyError = check('quantity', line.quantity, [required, notNegative])
+      const priceError = check('unit_price', line.unit_price, [required, notNegative])
       if (qtyError) errors[`qty-${line.id}`] = qtyError
       if (priceError) errors[`price-${line.id}`] = priceError
     })
 
-    const discountError = check('Giảm giá', draftDiscount, [required, notNegative])
-    if (discountError) errors.discount = discountError
-    if (!discountError && Number(draftDiscount) > draftSubtotal) {
-      errors.discount = 'Giảm giá không được lớn hơn tổng tiền hàng'
-    }
+    errors.discount = check('discount', draftDiscount, [
+      required,
+      notNegative,
+      max(draftSubtotal, `${money(draftSubtotal)}đ (tổng tiền hàng)`),
+    ])
 
     const clean = compact(errors)
     setEditErrors(clean)
@@ -72,7 +73,7 @@ export default function InvoiceDetail() {
 
   async function saveEdits() {
     if (!validateEdits()) {
-      toast.error('Còn ô nhập chưa hợp lệ — kiểm tra lại các dòng bôi đỏ.')
+      toast.error(msg('formInvalid'))
       return
     }
 

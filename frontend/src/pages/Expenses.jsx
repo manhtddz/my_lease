@@ -5,6 +5,7 @@ import { date, money, moneyd, todayISO } from '../lib/format'
 import { Empty, ErrorBox, Field, Modal, Spinner, useToast } from '../components/ui'
 import { useConfirm } from '../components/confirm'
 import { check, compact, dateNotFuture, positive, required } from '../lib/validate'
+import { msg } from '../lib/messages'
 
 const CATEGORY = {
   1: 'Hoá đơn tiện ích',
@@ -135,11 +136,18 @@ function ExpenseModal({ open, onClose, onSaved, rooms }) {
 
   function validate() {
     const clean = compact({
-      amount: check('Số tiền', form.amount, [required, positive]),
-      spent_at: check('Ngày chi', form.spent_at, [required, dateNotFuture]),
+      amount: check('amount', form.amount, [required, positive]),
+      spent_at: check('spent_at', form.spent_at, [required, dateNotFuture]),
     })
     setErrors(clean)
-    return Object.keys(clean).length === 0
+
+    if (Object.keys(clean).length > 0) {
+      toast.error(msg('formInvalid'))
+
+      return false
+    }
+
+    return true
   }
 
   async function submit() {

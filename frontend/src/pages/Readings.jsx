@@ -5,6 +5,9 @@ import { useApi } from '../lib/useApi'
 import { date, num, period } from '../lib/format'
 import { Badge, ErrorBox, Spinner, useToast } from '../components/ui'
 import { useConfirm } from '../components/confirm'
+import { msg } from '../lib/messages'
+
+const EMPTY_ROWS = []
 
 /**
  * Màn hình ghi số điện nước — một trang, một bảng, 12 ô nhập.
@@ -43,7 +46,9 @@ export default function Readings() {
     [currentPeriod],
   )
 
-  const rows = data?.rows ?? []
+  // Hằng số ngoài render: `?? []` tạo mảng mới mỗi lần, làm useMemo bên dưới
+  // tính lại vô ích ở mọi lần render.
+  const rows = data?.rows ?? EMPTY_ROWS
 
   const computed = useMemo(() => {
     const out = {}
@@ -61,23 +66,28 @@ export default function Readings() {
             ? 10 ** m.digits - m.prev_reading + curr
             : curr - m.prev_reading
 
-        const label = `${row.room_code} ${m.type === '1' ? 'điện' : 'nước'}`
+        // Vị trí trong bảng — cảnh báo phải nói rõ dòng nào mới dùng được.
+        const where = `${row.room_code} ${m.type === '1' ? 'điện' : 'nước'}`
         const warnings = []
         const errors = []
 
         // Lỗi: chặn lưu. Cảnh báo: cho lưu nhưng phải xác nhận.
-        if (Number.isNaN(Number(raw))) errors.push(`${label}: không phải số`)
-        if (Number(raw) < 0) errors.push(`${label}: không được âm`)
-        if (m.existing?.is_billed) errors.push(`${label}: đã chốt sổ, không sửa được`)
+        if (Number.isNaN(Number(raw))) errors.push(msg('readNotNumber', null, { where }))
+        if (Number(raw) < 0) errors.push(msg('readNegative', null, { where }))
+        if (m.existing?.is_billed) errors.push(msg('readBilled', null, { where }))
 
-        if (rolled && !changed[m.meter_id])
-          warnings.push(`${label}: số mới nhỏ hơn số cũ — đang tính là đồng hồ quay vòng`)
-        if (consumption === 0 && row.room_status === '2')
-          warnings.push(`${label}: tiêu thụ 0 dù phòng đang có người`)
-        if (m.avg_consumption && m.avg_consumption > 0 && consumption > m.avg_consumption * 2)
+        if (rolled && !changed[m.meter_id]) warnings.push(msg('readRollover', null, { where }))
+        if (consumption === 0 && row.room_status === '2') warnings.push(msg('readZero', null, { where }))
+        if (m.avg_consumption && m.avg_consumption > 0 && consumption > m.avg_consumption * 2) {
           warnings.push(
-            `${label}: ${num(consumption)} — cao gấp ${(consumption / m.avg_consumption).toFixed(1)} lần trung bình (${num(m.avg_consumption)})`,
+            msg('readTooHigh', null, {
+              where,
+              value: num(consumption),
+              times: (consumption / m.avg_consumption).toFixed(1),
+              average: num(m.avg_consumption),
+            }),
           )
+        }
 
         out[m.meter_id] = { consumption: Math.round(consumption * 100) / 100, warnings, errors }
       }),
@@ -124,7 +134,7 @@ export default function Readings() {
       })
 
       if (!entries.length) {
-        toast.error('Chưa nhập chỉ số nào.')
+        toast.error(msg('nothingEntered'))
         return
       }
 

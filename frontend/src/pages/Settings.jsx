@@ -5,6 +5,7 @@ import { money, moneyd } from '../lib/format'
 import { ErrorBox, Field, Spinner, useToast } from '../components/ui'
 import { useConfirm } from '../components/confirm'
 import { check, compact, notNegative, positive } from '../lib/validate'
+import { msg } from '../lib/messages'
 
 const PRICING_LABEL = { 1: 'Cố định', 2: 'Theo chỉ số', 3: 'Theo đầu người', 4: 'Theo ngày' }
 
@@ -31,11 +32,11 @@ export default function Settings() {
 
   async function save() {
     const clean = compact({
-      due_days: check('Số ngày tới hạn', values.due_days, [positive]),
+      due_days: check('due_days', values.due_days, [positive]),
     })
     setErrors(clean)
     if (Object.keys(clean).length > 0) {
-      toast.error('Kiểm tra lại ô bôi đỏ.')
+      toast.error(msg('formInvalid'))
       return
     }
 
@@ -51,7 +52,7 @@ export default function Settings() {
   }
 
   async function saveItem(item, price) {
-    const error = check('Giá', price, [notNegative])
+    const error = check('default_price', price, [notNegative])
     if (error) {
       toast.error(error)
       return

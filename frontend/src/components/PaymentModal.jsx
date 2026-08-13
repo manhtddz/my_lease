@@ -21,21 +21,24 @@ export default function PaymentModal({ invoice, onClose, onSubmit }) {
 
   // Mở hoá đơn nào thì prefill đúng số nợ của hoá đơn đó — trường hợp
   // thường gặp nhất là khách trả đủ.
+  const invoiceId = invoice?.id
+  const remaining = invoice?.remaining
+
   useEffect(() => {
-    if (invoice) {
-      setAmount(String(invoice.remaining))
+    if (invoiceId !== undefined) {
+      setAmount(String(remaining))
       setErrors({})
       setBusy(false)
     }
-  }, [invoice?.id, invoice?.remaining])
+  }, [invoiceId, remaining])
 
   if (!invoice) return null
 
   function validate() {
     const clean = compact({
-      amount: check('Số tiền', amount, [required, positive]),
-      paid_at: check('Ngày thu', paidAt, [required]),
-      ref_no: method === '2' ? check('Mã giao dịch', refNo, [required]) : null,
+      amount: check('amount', amount, [required, positive]),
+      paid_at: check('paid_at', paidAt, [required]),
+      ref_no: method === '2' ? check('ref_no', refNo, [required]) : null,
     })
     setErrors(clean)
     return Object.keys(clean).length === 0

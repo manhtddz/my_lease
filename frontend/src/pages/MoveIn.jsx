@@ -5,7 +5,8 @@ import { useApi } from '../lib/useApi'
 import { date, money, moneyd, num } from '../lib/format'
 import { ErrorBox, Field as FormField, Spinner, useToast } from '../components/ui'
 import { useConfirm } from '../components/confirm'
-import { check, compact, idCard, notNegative, phone, positive, required } from '../lib/validate'
+import { check, compact, dateAfter, idCard, notLessThan, notNegative, phone, positive, required } from '../lib/validate'
+import { msg } from '../lib/messages'
 
 const STEPS = ['Người thuê', 'Người ở ghép', 'Điều khoản', 'Chốt số đồng hồ']
 
@@ -84,18 +85,17 @@ export default function MoveIn() {
 
     if (index === 0) {
       clean = compact({
-        full_name: check('Họ tên', form.tenant.full_name, [required]),
-        phone: phone(form.tenant.phone),
-        id_card_no: idCard(form.tenant.id_card_no),
+        full_name: check('full_name', form.tenant.full_name, [required]),
+        phone: check('phone', form.tenant.phone, [phone]),
+        id_card_no: check('id_card_no', form.tenant.id_card_no, [idCard]),
       })
     }
 
     if (index === 1) {
       const occupantErrors = {}
       form.occupants.forEach((o, i) => {
-        if (!o.full_name.trim()) occupantErrors[`occupant-${i}`] = 'Nhập họ tên hoặc xoá dòng này'
-        const cardError = idCard(o.id_card_no)
-        if (cardError) occupantErrors[`occupant-card-${i}`] = cardError
+        occupantErrors[`occupant-${i}`] = check('occupant_name', o.full_name, [required])
+        occupantErrors[`occupant-card-${i}`] = check('id_card_no', o.id_card_no, [idCard])
       })
       clean = compact(occupantErrors)
     }
@@ -103,17 +103,18 @@ export default function MoveIn() {
     if (index === 2) {
       const serviceErrors = {}
       form.services.forEach((s) => {
-        const priceError = check('Đơn giá', s.unit_price, [required, notNegative])
-        if (priceError) serviceErrors[`service-${s.service_item_id}`] = priceError
+        serviceErrors[`service-${s.service_item_id}`] = check('unit_price', s.unit_price, [
+          required,
+          notNegative,
+        ])
       })
 
       clean = compact({
-        rent_amount: check('Tiền phòng', form.rent_amount, [required, positive]),
-        deposit_amount: check('Tiền cọc', form.deposit_amount, [required, notNegative]),
-        start_date: check('Ngày vào', form.start_date, [required]),
-        occupant_count: check('Số người ở', form.occupant_count, [required, positive]),
-        end_date:
-          form.end_date && form.end_date < form.start_date ? 'Ngày hết hạn phải sau ngày vào' : null,
+        rent_amount: check('rent_amount', form.rent_amount, [required, positive]),
+        deposit_amount: check('deposit_amount', form.deposit_amount, [required, notNegative]),
+        start_date: check('start_date', form.start_date, [required]),
+        occupant_count: check('occupant_count', form.occupant_count, [required, positive]),
+        end_date: check('end_date', form.end_date, [dateAfter(form.start_date, 'ngày vào')]),
         ...serviceErrors,
       })
     }
@@ -121,14 +122,12 @@ export default function MoveIn() {
     if (index === 3) {
       const readingErrors = {}
       form.meter_readings.forEach((m) => {
-        const label = m.type === '1' ? 'Chỉ số điện' : 'Chỉ số nước'
-        const error = check(label, m.reading, [required, notNegative])
-        if (error) {
-          readingErrors[`reading-${m.meter_id}`] = error
-        } else if (Number(m.reading) < m.prev_reading) {
-          readingErrors[`reading-${m.meter_id}`] =
-            `${label} nhỏ hơn số cũ (${num(m.prev_reading)}) — kiểm tra lại`
-        }
+        const field = m.type === '1' ? 'reading_electric' : 'reading_water'
+        readingErrors[`reading-${m.meter_id}`] = check(field, m.reading, [
+          required,
+          notNegative,
+          notLessThan(m.prev_reading, num(m.prev_reading)),
+        ])
       })
       clean = compact(readingErrors)
     }
@@ -139,7 +138,7 @@ export default function MoveIn() {
 
   function goNext() {
     if (!validateStep(step)) {
-      toast.error('Kiểm tra lại các ô bôi đỏ.')
+      toast.error(msg('formInvalid'))
       return
     }
     setStep((s) => s + 1)
@@ -150,7 +149,7 @@ export default function MoveIn() {
     for (let i = 0; i <= 3; i++) {
       if (!validateStep(i)) {
         setStep(i)
-        toast.error(`Bước ${i + 1} còn thiếu thông tin.`)
+        toast.error(msg('stepIncomplete', null, { step: i + 1 }))
         return
       }
     }

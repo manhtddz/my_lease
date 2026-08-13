@@ -5,7 +5,8 @@ import { useApi } from '../lib/useApi'
 import { date, money, moneyd, num, todayISO } from '../lib/format'
 import { ErrorBox, Field, Spinner, useToast } from '../components/ui'
 import { useConfirm } from '../components/confirm'
-import { check, compact, notNegative, required } from '../lib/validate'
+import { check, compact, dateAfter, max, notLessThan, notNegative, required } from '../lib/validate'
+import { msg } from '../lib/messages'
 
 /**
  * Wizard trả phòng — sinh meter_readings reason='3' và hoá đơn is_settlement.
@@ -45,26 +46,26 @@ export default function MoveOut() {
   function validate() {
     const readingErrors = {}
     readings.forEach((m) => {
-      const label = m.type === '1' ? 'Chỉ số điện' : 'Chỉ số nước'
-      const error = check(label, m.reading, [required, notNegative])
-      if (error) {
-        readingErrors[`reading-${m.meter_id}`] = error
-      } else if (Number(m.reading) < m.prev_reading) {
-        readingErrors[`reading-${m.meter_id}`] = `${label} nhỏ hơn số cũ (${num(m.prev_reading)}) — kiểm tra lại`
-      }
+      const field = m.type === '1' ? 'reading_electric' : 'reading_water'
+      readingErrors[`reading-${m.meter_id}`] = check(field, m.reading, [
+        required,
+        notNegative,
+        notLessThan(m.prev_reading, num(m.prev_reading)),
+      ])
     })
 
     const clean = compact({
-      end_date: check('Ngày trả phòng', endDate, [required]),
-      start_before:
-        endDate < data.period_from ? 'Ngày trả phòng không được trước ngày bắt đầu kỳ tính tiền' : null,
-      deduction: check('Tiền trừ cọc', deduction, [required, notNegative]),
-      deduction_over:
-        Number(deduction) > data.deposit_held
-          ? `Trừ cọc không được vượt quá số cọc đang giữ (${moneyd(data.deposit_held)})`
-          : null,
-      deduction_reason:
-        Number(deduction) > 0 && !reason.trim() ? 'Nhập lý do khi trừ tiền cọc' : null,
+      end_date: check('end_date', endDate, [
+        required,
+        dateAfter(data.period_from, 'ngày bắt đầu kỳ tính tiền'),
+      ], 'Ngày trả phòng'),
+      deduction: check('deduction', deduction, [
+        required,
+        notNegative,
+        max(data.deposit_held, `${moneyd(data.deposit_held)} (cọc đang giữ)`),
+      ]),
+      // Lý do chỉ bắt buộc khi thực sự trừ tiền — khớp với Rule::requiredIf ở backend.
+      deduction_reason: Number(deduction) > 0 ? check('deduction_reason', reason, [required]) : null,
       ...readingErrors,
     })
 
@@ -74,7 +75,7 @@ export default function MoveOut() {
 
   async function submit() {
     if (!validate()) {
-      toast.error('Kiểm tra lại các ô bôi đỏ.')
+      toast.error(msg('formInvalid'))
       return
     }
 
@@ -123,7 +124,7 @@ export default function MoveOut() {
       </div>
 
       <Section title="1 · Ngày trả phòng">
-        <Field error={errors.end_date || errors.start_before} className="w-48">
+        <Field error={errors.end_date} className="w-48">
           <input type="date" className="field" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
         </Field>
         <p className="mt-1 text-xs text-slate-500">
@@ -184,7 +185,7 @@ export default function MoveOut() {
             Cọc đang giữ: <b className="tabular-nums">{moneyd(data.deposit_held)}</b>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Trừ hỏng hóc" error={errors.deduction || errors.deduction_over}>
+            <Field label="Trừ hỏng hóc" error={errors.deduction}>
               <input
                 className="field text-right tabular-nums"
                 inputMode="numeric"
