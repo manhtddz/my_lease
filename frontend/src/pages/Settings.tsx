@@ -1,20 +1,21 @@
 import { useState } from 'react'
-import { api } from '../lib/api'
-import { useApi } from '../lib/useApi'
-import { money, moneyd } from '../lib/format'
-import { ErrorBox, Field, Spinner, useToast } from '../components/ui'
-import { useConfirm } from '../components/confirm'
-import { check, compact, notNegative, positive } from '../lib/validate'
-import { msg } from '../lib/messages'
+import { api } from '@/lib/api'
+import { useApi } from '@/lib/useApi'
+import { money, moneyd } from '@/lib/format'
+import { ErrorBox, Field, Spinner, useToast } from '@/components/ui'
+import { useConfirm } from '@/components/confirm'
+import { msg } from '@/lib/messages'
+import { check, compact, hasErrors, notNegative, positive, type Errors } from '@/lib/validate'
+import { PRICING_MODE_LABEL, type ServiceItem } from '@/types'
 
-const PRICING_LABEL = { 1: 'Cố định', 2: 'Theo chỉ số', 3: 'Theo đầu người', 4: 'Theo ngày' }
+type SettingValues = Record<string, string>
 
 export default function Settings() {
   const toast = useToast()
   const confirm = useConfirm()
-  const [values, setValues] = useState(null)
+  const [values, setValues] = useState<SettingValues | null>(null)
   const [saving, setSaving] = useState(false)
-  const [errors, setErrors] = useState({})
+  const [errors, setErrors] = useState<Errors>({})
 
   const settings = useApi(
     () =>
@@ -29,13 +30,17 @@ export default function Settings() {
 
   if (settings.loading || items.loading || !values) return <Spinner />
   if (settings.error) return <ErrorBox error={settings.error} onRetry={settings.reload} />
+  if (!settings.data || !items.data) return null
 
   async function save() {
+    if (!values) return
+
     const clean = compact({
       due_days: check('due_days', values.due_days, [positive]),
     })
     setErrors(clean)
-    if (Object.keys(clean).length > 0) {
+
+    if (hasErrors(clean)) {
       toast.error(msg('formInvalid'))
       return
     }
@@ -45,13 +50,13 @@ export default function Settings() {
       await api.updateSettings(values)
       toast.success('Đã lưu cấu hình.')
     } catch (err) {
-      toast.error(err.message)
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
       setSaving(false)
     }
   }
 
-  async function saveItem(item, price) {
+  async function saveItem(item: ServiceItem, price: string) {
     const error = check('default_price', price, [notNegative])
     if (error) {
       toast.error(error)
@@ -76,7 +81,7 @@ export default function Settings() {
       toast.success(`Đã cập nhật giá mặc định ${item.name}.`)
       items.reload()
     } catch (err) {
-      toast.error(err.message)
+      toast.error(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -93,7 +98,7 @@ export default function Settings() {
                 className="field"
                 inputMode={key === 'due_days' ? 'numeric' : undefined}
                 value={values[key] ?? ''}
-                onChange={(e) => setValues((v) => ({ ...v, [key]: e.target.value }))}
+                onChange={(e) => setValues((v) => ({ ...(v ?? {}), [key]: e.target.value }))}
               />
             </Field>
           ))}
@@ -109,8 +114,8 @@ export default function Settings() {
         <div className="border-b border-slate-100 px-5 py-3">
           <h2 className="text-sm font-bold text-slate-700">Danh mục khoản thu</h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            Đổi giá ở đây <b>không</b> ảnh hưởng hợp đồng đang chạy — chỉ dùng để prefill khi tạo hợp đồng mới.
-            Muốn tăng giá khách hiện tại thì sửa trong hợp đồng.
+            Đổi giá ở đây <b>không</b> ảnh hưởng hợp đồng đang chạy — chỉ dùng để prefill khi tạo hợp
+            đồng mới. Muốn tăng giá khách hiện tại thì sửa trong hợp đồng.
           </p>
         </div>
         <table className="w-full text-sm">
@@ -134,7 +139,13 @@ export default function Settings() {
   )
 }
 
-function ServiceRow({ item, onSave }) {
+function ServiceRow({
+  item,
+  onSave,
+}: {
+  item: ServiceItem
+  onSave: (item: ServiceItem, price: string) => void
+}) {
   const [price, setPrice] = useState(String(item.default_price))
   const dirty = Number(price) !== item.default_price
 
@@ -146,18 +157,26 @@ function ServiceRow({ item, onSave }) {
           <div className="text-[11px] text-slate-400">lưu ở hợp đồng, không vào bảng giá dịch vụ</div>
         )}
       </td>
-      <td className="px-4 py-2 text-slate-600">{PRICING_LABEL[item.pricing_mode]}</td>
+      <td className="px-4 py-2 text-slate-600">{PRICING_MODE_LABEL[item.pricing_mode]}</td>
       <td className="px-4 py-2 text-slate-500">{item.unit_label || '—'}</td>
       <td className="px-4 py-2 text-right">
         {item.is_service ? (
-          <input className="num-input w-32" inputMode="numeric" value={price} onChange={(e) => setPrice(e.target.value)} />
+          <input
+            className="num-input w-32"
+            inputMode="numeric"
+            value={price}
+            onChange={(e) => setPrice(e.target.value)}
+          />
         ) : (
           <span className="text-slate-400">theo hợp đồng</span>
         )}
       </td>
       <td className="px-4 py-2 text-right">
         {dirty && item.is_service && (
-          <button className="text-xs font-medium text-sky-700 hover:underline" onClick={() => onSave(item, price)}>
+          <button
+            className="text-xs font-medium text-sky-700 hover:underline"
+            onClick={() => onSave(item, price)}
+          >
             lưu ({money(price)})
           </button>
         )}

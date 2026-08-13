@@ -54,7 +54,10 @@ export const FIELD = {
   // cấu hình
   due_days: 'Số ngày tới hạn',
   default_price: 'Giá mặc định',
-}
+} as const
+
+/** Khoá field đã khai. Truyền khoá lạ vào `check()` sẽ bị tsc chặn. */
+export type FieldKey = keyof typeof FIELD
 
 /**
  * Khuôn thông điệp. `{field}` là nhãn, các `{tên}` khác lấy từ tham số.
@@ -84,24 +87,36 @@ export const MESSAGE = {
   readRollover: '{where}: số mới nhỏ hơn số cũ — đang tính là đồng hồ quay vòng',
   readZero: '{where}: tiêu thụ 0 dù phòng đang có người',
   readTooHigh: '{where}: {value} — cao gấp {times} lần trung bình ({average})',
-}
+} as const
 
-/** Nhãn của field, không có trong từ điển thì trả về chính key để còn nhận ra. */
-export function label(field) {
-  return FIELD[field] ?? field
+export type MessageKey = keyof typeof MESSAGE
+
+/** Nhãn có thể là khoá đã khai, hoặc chuỗi tự do khi cần ghi đè. */
+export type FieldOrLabel = FieldKey | string
+
+/** Giá trị thay vào chỗ trống của khuôn thông điệp. */
+export type MessageParams = Record<string, string | number>
+
+/** Nhãn của field; không có trong từ điển thì trả về chính key để còn nhận ra. */
+export function label(field: FieldOrLabel): string {
+  return (FIELD as Record<string, string>)[field] ?? field
 }
 
 /**
  * Dựng thông điệp: msg('max', 'deduction', { max: '2.000.000đ' })
  *   → "Tiền trừ cọc không được vượt quá 2.000.000đ"
  */
-export function msg(key, field = null, params = {}) {
-  let template = MESSAGE[key] ?? key
+export function msg(
+  key: MessageKey,
+  field: FieldOrLabel | null = null,
+  params: MessageParams = {},
+): string {
+  let template: string = MESSAGE[key]
 
-  const values = { field: field ? label(field) : '', ...params }
+  const values: MessageParams = { field: field ? label(field) : '', ...params }
 
   for (const [name, value] of Object.entries(values)) {
-    template = template.replaceAll(`{${name}}`, value)
+    template = template.replaceAll(`{${name}}`, String(value))
   }
 
   return template.trim()

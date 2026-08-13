@@ -1,12 +1,20 @@
 import { useCallback, useEffect, useState } from 'react'
 
+export interface UseApiResult<T> {
+  data: T | null
+  error: Error | null
+  loading: boolean
+  reload: () => void
+  setData: (value: T | null) => void
+}
+
 /**
  * Fetch tối giản: không dùng thư viện query vì app chỉ có 1 người dùng,
  * không cần cache chia sẻ hay revalidate nền.
  */
-export function useApi(fetcher, deps = []) {
-  const [data, setData] = useState(null)
-  const [error, setError] = useState(null)
+export function useApi<T>(fetcher: () => Promise<T>, deps: unknown[] = []): UseApiResult<T> {
+  const [data, setData] = useState<T | null>(null)
+  const [error, setError] = useState<Error | null>(null)
   const [loading, setLoading] = useState(true)
   const [tick, setTick] = useState(0)
 
@@ -18,9 +26,15 @@ export function useApi(fetcher, deps = []) {
     setError(null)
 
     fetcher()
-      .then((result) => alive && setData(result))
-      .catch((err) => alive && setError(err))
-      .finally(() => alive && setLoading(false))
+      .then((result) => {
+        if (alive) setData(result)
+      })
+      .catch((err: unknown) => {
+        if (alive) setError(err instanceof Error ? err : new Error(String(err)))
+      })
+      .finally(() => {
+        if (alive) setLoading(false)
+      })
 
     return () => {
       alive = false

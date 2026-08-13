@@ -1,48 +1,106 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api } from '../lib/api'
-import { useApi } from '../lib/useApi'
-import { date, money, moneyd, num } from '../lib/format'
-import { ErrorBox, Field as FormField, Spinner, useToast } from '../components/ui'
-import { useConfirm } from '../components/confirm'
-import { check, compact, dateAfter, idCard, notLessThan, notNegative, phone, positive, required } from '../lib/validate'
-import { msg } from '../lib/messages'
+import { api } from '@/lib/api'
+import { useApi } from '@/lib/useApi'
+import { date, money, moneyd, num } from '@/lib/format'
+import { ErrorBox, Field as FormField, Spinner, useToast } from '@/components/ui'
+import { useConfirm } from '@/components/confirm'
+import { msg } from '@/lib/messages'
+import {
+  check,
+  compact,
+  dateAfter,
+  hasErrors,
+  idCard,
+  notLessThan,
+  notNegative,
+  phone,
+  positive,
+  required,
+} from '@/lib/validate'
+import {
+  Gender,
+  METER_UNIT,
+  MeterType,
+  type MeterSnapshot,
+  type MoveInOccupantPayload,
+  type ServiceDefault,
+} from '@/types'
 
-const STEPS = ['Người thuê', 'Người ở ghép', 'Điều khoản', 'Chốt số đồng hồ']
+const STEPS = ['Người thuê', 'Người ở ghép', 'Điều khoản', 'Chốt số đồng hồ'] as const
+
+/** Khoản dịch vụ trong form — giá giữ dạng chuỗi vì đến từ input. */
+interface ServiceRow extends Omit<ServiceDefault, 'unit_price'> {
+  unit_price: string
+  quantity_fixed?: string
+}
+
+interface ReadingInput extends MeterSnapshot {
+  reading: string
+}
+
+interface MoveInForm {
+  tenant: {
+    full_name: string
+    phone: string
+    id_card_no: string
+    dob: string
+    gender: Gender
+    hometown: string
+  }
+  occupants: MoveInOccupantPayload[]
+  start_date: string
+  end_date: string
+  rent_amount: string
+  deposit_amount: string
+  occupant_count: string
+  note: string
+  services: ServiceRow[]
+  disabledServices: ServiceRow[]
+  meter_readings: ReadingInput[]
+}
 
 /**
  * Wizard nhận khách mới — sinh meter_readings reason='2'.
  * Bước 4 bắt buộc: thiếu nó thì hoá đơn đầu tiên sẽ tính cả điện của khách trước.
  */
 export default function MoveIn() {
-  const { roomId } = useParams()
+  const { roomId } = useParams<{ roomId: string }>()
   const navigate = useNavigate()
   const toast = useToast()
   const confirm = useConfirm()
 
   const [step, setStep] = useState(0)
   const [saving, setSaving] = useState(false)
-  const [form, setForm] = useState(null)
-  const [errors, setErrors] = useState({})
+  const [form, setForm] = useState<MoveInForm | null>(null)
+  const [errors, setErrors] = useState<Record<string, string>>({})
 
   const { data, error, loading, reload } = useApi(
     () =>
-      api.moveInDefaults(roomId).then((res) => {
+      api.moveInDefaults(roomId!).then((res) => {
+        const toRow = (s: ServiceDefault): ServiceRow => ({ ...s, unit_price: String(s.unit_price) })
+
         setForm({
-          tenant: { full_name: '', phone: '', id_card_no: '', dob: '', gender: '1', hometown: '' },
+          tenant: {
+            full_name: '',
+            phone: '',
+            id_card_no: '',
+            dob: '',
+            gender: Gender.Male,
+            hometown: '',
+          },
           occupants: [],
           start_date: res.today,
           end_date: '',
-          rent_amount: res.room.default_rent,
-          deposit_amount: res.room.default_rent,
-          occupant_count: 1,
+          rent_amount: String(res.room.default_rent),
+          deposit_amount: String(res.room.default_rent),
+          occupant_count: '1',
           note: '',
-          services: res.services
-            .filter((s) => s.suggested)
-            .map((s) => ({ ...s, enabled: true })),
-          disabledServices: res.services.filter((s) => !s.suggested).map((s) => ({ ...s, enabled: false })),
+          services: res.services.filter((s) => s.suggested).map(toRow),
+          disabledServices: res.services.filter((s) => !s.suggested).map(toRow),
           meter_readings: res.meters.map((m) => ({ ...m, reading: String(m.prev_reading) })),
         })
+
         return res
       }),
     [roomId],
@@ -50,90 +108,93 @@ export default function MoveIn() {
 
   if (loading || !form) return <Spinner />
   if (error) return <ErrorBox error={error} onRetry={reload} />
+  if (!data) return null
 
-  const allServices = [...form.services, ...form.disabledServices].sort((a, b) => a.service_item_id - b.service_item_id)
+  const allServices = [...form.services, ...form.disabledServices].sort(
+    (a, b) => a.service_item_id - b.service_item_id,
+  )
 
-  function patch(next) {
-    setForm((f) => ({ ...f, ...next }))
+  function patch(next: Partial<MoveInForm>) {
+    setForm((f) => (f ? { ...f, ...next } : f))
   }
 
-  function toggleService(id) {
-    const inActive = form.services.find((s) => s.service_item_id === id)
+  function toggleService(serviceItemId: number) {
+    if (!form) return
+
+    const inActive = form.services.find((s) => s.service_item_id === serviceItemId)
     if (inActive) {
       patch({
-        services: form.services.filter((s) => s.service_item_id !== id),
+        services: form.services.filter((s) => s.service_item_id !== serviceItemId),
         disabledServices: [...form.disabledServices, inActive],
       })
-    } else {
-      const item = form.disabledServices.find((s) => s.service_item_id === id)
-      patch({
-        services: [...form.services, item],
-        disabledServices: form.disabledServices.filter((s) => s.service_item_id !== id),
-      })
+      return
     }
+
+    const item = form.disabledServices.find((s) => s.service_item_id === serviceItemId)
+    if (!item) return
+
+    patch({
+      services: [...form.services, item],
+      disabledServices: form.disabledServices.filter((s) => s.service_item_id !== serviceItemId),
+    })
   }
 
-  function setServicePrice(id, key, value) {
+  function setServiceField(serviceItemId: number, key: 'unit_price' | 'quantity_fixed', value: string) {
+    if (!form) return
     patch({
-      services: form.services.map((s) => (s.service_item_id === id ? { ...s, [key]: value } : s)),
+      services: form.services.map((s) =>
+        s.service_item_id === serviceItemId ? { ...s, [key]: value } : s,
+      ),
     })
   }
 
   /** Validate riêng từng bước — chặn ngay tại bước sai, không dồn tới cuối. */
-  function validateStep(index) {
-    let clean = {}
+  function validateStep(index: number): boolean {
+    if (!form) return false
+
+    let raw: Record<string, string | null> = {}
 
     if (index === 0) {
-      clean = compact({
+      raw = {
         full_name: check('full_name', form.tenant.full_name, [required]),
         phone: check('phone', form.tenant.phone, [phone]),
         id_card_no: check('id_card_no', form.tenant.id_card_no, [idCard]),
-      })
+      }
     }
 
     if (index === 1) {
-      const occupantErrors = {}
       form.occupants.forEach((o, i) => {
-        occupantErrors[`occupant-${i}`] = check('occupant_name', o.full_name, [required])
-        occupantErrors[`occupant-card-${i}`] = check('id_card_no', o.id_card_no, [idCard])
+        raw[`occupant-${i}`] = check('occupant_name', o.full_name, [required])
+        raw[`occupant-card-${i}`] = check('id_card_no', o.id_card_no, [idCard])
       })
-      clean = compact(occupantErrors)
     }
 
     if (index === 2) {
-      const serviceErrors = {}
       form.services.forEach((s) => {
-        serviceErrors[`service-${s.service_item_id}`] = check('unit_price', s.unit_price, [
-          required,
-          notNegative,
-        ])
+        raw[`service-${s.service_item_id}`] = check('unit_price', s.unit_price, [required, notNegative])
       })
 
-      clean = compact({
-        rent_amount: check('rent_amount', form.rent_amount, [required, positive]),
-        deposit_amount: check('deposit_amount', form.deposit_amount, [required, notNegative]),
-        start_date: check('start_date', form.start_date, [required]),
-        occupant_count: check('occupant_count', form.occupant_count, [required, positive]),
-        end_date: check('end_date', form.end_date, [dateAfter(form.start_date, 'ngày vào')]),
-        ...serviceErrors,
-      })
+      raw.rent_amount = check('rent_amount', form.rent_amount, [required, positive])
+      raw.deposit_amount = check('deposit_amount', form.deposit_amount, [required, notNegative])
+      raw.start_date = check('start_date', form.start_date, [required])
+      raw.occupant_count = check('occupant_count', form.occupant_count, [required, positive])
+      raw.end_date = check('end_date', form.end_date, [dateAfter(form.start_date, 'ngày vào')])
     }
 
     if (index === 3) {
-      const readingErrors = {}
       form.meter_readings.forEach((m) => {
-        const field = m.type === '1' ? 'reading_electric' : 'reading_water'
-        readingErrors[`reading-${m.meter_id}`] = check(field, m.reading, [
+        const field = m.type === MeterType.Electric ? 'reading_electric' : 'reading_water'
+        raw[`reading-${m.meter_id}`] = check(field, m.reading, [
           required,
           notNegative,
           notLessThan(m.prev_reading, num(m.prev_reading)),
         ])
       })
-      clean = compact(readingErrors)
     }
 
-    setErrors(clean)
-    return Object.keys(clean).length === 0
+    const clean = compact(raw)
+    setErrors(clean as Record<string, string>)
+    return !hasErrors(clean)
   }
 
   function goNext() {
@@ -145,6 +206,8 @@ export default function MoveIn() {
   }
 
   async function submit() {
+    if (!form || !data) return
+
     // Chạy lại validate tất cả các bước — người dùng có thể quay lại sửa rồi nhảy tới.
     for (let i = 0; i <= 3; i++) {
       if (!validateStep(i)) {
@@ -161,7 +224,9 @@ export default function MoveIn() {
         `Tiền phòng ${moneyd(form.rent_amount)} / tháng`,
         `Tiền cọc ${moneyd(form.deposit_amount)} — sẽ ghi nhận là đã thu`,
         `${form.services.length} khoản phí dịch vụ`,
-        `Chốt số đồng hồ: ${form.meter_readings.map((m) => `${m.type === '1' ? 'điện' : 'nước'} ${num(m.reading)}`).join(', ')}`,
+        `Chốt số đồng hồ: ${form.meter_readings
+          .map((m) => `${m.type === MeterType.Electric ? 'điện' : 'nước'} ${num(m.reading)}`)
+          .join(', ')}`,
         'Phòng chuyển sang trạng thái đang thuê.',
       ],
       confirmLabel: 'Tạo hợp đồng',
@@ -196,7 +261,7 @@ export default function MoveIn() {
       toast.success(`Đã tạo hợp đồng ${result.code}.`)
       navigate('/')
     } catch (err) {
-      toast.error(err.message)
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
       setSaving(false)
     }
@@ -219,7 +284,11 @@ export default function MoveIn() {
           <li
             key={label}
             className={`rounded-full px-3 py-1 font-medium ${
-              i === step ? 'bg-sky-600 text-white' : i < step ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-500'
+              i === step
+                ? 'bg-sky-600 text-white'
+                : i < step
+                  ? 'bg-emerald-100 text-emerald-800'
+                  : 'bg-slate-200 text-slate-500'
             }`}
           >
             {i + 1}. {label}
@@ -238,23 +307,44 @@ export default function MoveIn() {
               />
             </Field>
             <Field label="Số điện thoại" error={errors.phone}>
-              <input className="field" value={form.tenant.phone} onChange={(e) => patch({ tenant: { ...form.tenant, phone: e.target.value } })} />
+              <input
+                className="field"
+                value={form.tenant.phone}
+                onChange={(e) => patch({ tenant: { ...form.tenant, phone: e.target.value } })}
+              />
             </Field>
             <Field label="CCCD / CMND" error={errors.id_card_no} hint="12 số (CCCD) hoặc 9 số (CMND)">
-              <input className="field" value={form.tenant.id_card_no} onChange={(e) => patch({ tenant: { ...form.tenant, id_card_no: e.target.value } })} />
+              <input
+                className="field"
+                value={form.tenant.id_card_no}
+                onChange={(e) => patch({ tenant: { ...form.tenant, id_card_no: e.target.value } })}
+              />
             </Field>
             <Field label="Ngày sinh">
-              <input type="date" className="field" value={form.tenant.dob} onChange={(e) => patch({ tenant: { ...form.tenant, dob: e.target.value } })} />
+              <input
+                type="date"
+                className="field"
+                value={form.tenant.dob}
+                onChange={(e) => patch({ tenant: { ...form.tenant, dob: e.target.value } })}
+              />
             </Field>
             <Field label="Giới tính">
-              <select className="field" value={form.tenant.gender} onChange={(e) => patch({ tenant: { ...form.tenant, gender: e.target.value } })}>
-                <option value="1">Nam</option>
-                <option value="2">Nữ</option>
-                <option value="3">Khác</option>
+              <select
+                className="field"
+                value={form.tenant.gender}
+                onChange={(e) => patch({ tenant: { ...form.tenant, gender: e.target.value as Gender } })}
+              >
+                <option value={Gender.Male}>Nam</option>
+                <option value={Gender.Female}>Nữ</option>
+                <option value={Gender.Other}>Khác</option>
               </select>
             </Field>
             <Field label="Thường trú (khai tạm trú)" span>
-              <input className="field" value={form.tenant.hometown} onChange={(e) => patch({ tenant: { ...form.tenant, hometown: e.target.value } })} />
+              <input
+                className="field"
+                value={form.tenant.hometown}
+                onChange={(e) => patch({ tenant: { ...form.tenant, hometown: e.target.value } })}
+              />
             </Field>
           </div>
         )}
@@ -285,7 +375,7 @@ export default function MoveIn() {
                   <input
                     className={`field ${errors[`occupant-card-${i}`] ? 'border-rose-400' : ''}`}
                     placeholder="CCCD"
-                    value={occupant.id_card_no || ''}
+                    value={occupant.id_card_no ?? ''}
                     onChange={(e) => {
                       const next = [...form.occupants]
                       next[i] = { ...occupant, id_card_no: e.target.value }
@@ -300,7 +390,7 @@ export default function MoveIn() {
                   <input
                     className="field"
                     placeholder="Quan hệ"
-                    value={occupant.relationship || ''}
+                    value={occupant.relationship ?? ''}
                     onChange={(e) => {
                       const next = [...form.occupants]
                       next[i] = { ...occupant, relationship: e.target.value }
@@ -321,7 +411,7 @@ export default function MoveIn() {
               onClick={() =>
                 patch({
                   occupants: [...form.occupants, { full_name: '', id_card_no: '', relationship: '' }],
-                  occupant_count: form.occupants.length + 2,
+                  occupant_count: String(form.occupants.length + 2),
                 })
               }
             >
@@ -350,10 +440,20 @@ export default function MoveIn() {
                 />
               </Field>
               <Field label="Ngày vào" error={errors.start_date}>
-                <input type="date" className="field" value={form.start_date} onChange={(e) => patch({ start_date: e.target.value })} />
+                <input
+                  type="date"
+                  className="field"
+                  value={form.start_date}
+                  onChange={(e) => patch({ start_date: e.target.value })}
+                />
               </Field>
               <Field label="Ngày hết hạn (bỏ trống = không hạn)" error={errors.end_date}>
-                <input type="date" className="field" value={form.end_date} onChange={(e) => patch({ end_date: e.target.value })} />
+                <input
+                  type="date"
+                  className="field"
+                  value={form.end_date}
+                  onChange={(e) => patch({ end_date: e.target.value })}
+                />
               </Field>
               <Field label="Tổng số người ở" error={errors.occupant_count}>
                 <input
@@ -367,39 +467,57 @@ export default function MoveIn() {
             </div>
 
             <div>
-              <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">Phí dịch vụ</h3>
+              <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">
+                Phí dịch vụ
+              </h3>
               <p className="mb-2 text-xs text-slate-400">
-                Tiền phòng không nằm ở đây — nó lưu trực tiếp trên hợp đồng để tránh hai nguồn cùng giữ một con số.
+                Tiền phòng không nằm ở đây — nó lưu trực tiếp trên hợp đồng để tránh hai nguồn cùng giữ
+                một con số.
               </p>
               <div className="space-y-2">
                 {allServices.map((s) => {
                   const active = form.services.find((x) => x.service_item_id === s.service_item_id)
                   return (
-                    <div key={s.service_item_id} className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 p-2">
+                    <div
+                      key={s.service_item_id}
+                      className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 p-2"
+                    >
                       <label className="flex min-w-32 flex-1 items-center gap-2 text-sm">
-                        <input type="checkbox" checked={!!active} onChange={() => toggleService(s.service_item_id)} />
+                        <input
+                          type="checkbox"
+                          checked={!!active}
+                          onChange={() => toggleService(s.service_item_id)}
+                        />
                         {s.name}
                       </label>
                       {active && (
                         <>
                           <div>
                             <input
-                              className={`num-input w-28 ${errors[`service-${s.service_item_id}`] ? 'border-rose-400' : ''}`}
+                              className={`num-input w-28 ${
+                                errors[`service-${s.service_item_id}`] ? 'border-rose-400' : ''
+                              }`}
                               inputMode="numeric"
                               value={active.unit_price}
-                              onChange={(e) => setServicePrice(s.service_item_id, 'unit_price', e.target.value)}
+                              onChange={(e) =>
+                                setServiceField(s.service_item_id, 'unit_price', e.target.value)
+                              }
                             />
                             {errors[`service-${s.service_item_id}`] && (
-                              <p className="mt-1 text-[11px] text-rose-600">{errors[`service-${s.service_item_id}`]}</p>
+                              <p className="mt-1 text-[11px] text-rose-600">
+                                {errors[`service-${s.service_item_id}`]}
+                              </p>
                             )}
                           </div>
                           <span className="w-14 text-xs text-slate-500">/ {s.unit_label || 'lần'}</span>
-                          {s.pricing_mode === '1' && s.code === 'parking' && (
+                          {s.code === 'parking' && (
                             <input
                               className="num-input w-16"
                               placeholder="SL"
-                              value={active.quantity_fixed || ''}
-                              onChange={(e) => setServicePrice(s.service_item_id, 'quantity_fixed', e.target.value)}
+                              value={active.quantity_fixed ?? ''}
+                              onChange={(e) =>
+                                setServiceField(s.service_item_id, 'quantity_fixed', e.target.value)
+                              }
                             />
                           )}
                         </>
@@ -415,14 +533,19 @@ export default function MoveIn() {
         {step === 3 && (
           <div className="space-y-3">
             <p className="text-sm text-slate-600">
-              Chốt số đồng hồ tại ngày vào <b>{date(form.start_date)}</b>. Bắt buộc — đây là điểm khởi đầu chuỗi đọc
-              của khách này.
+              Chốt số đồng hồ tại ngày vào <b>{date(form.start_date)}</b>. Bắt buộc — đây là điểm khởi đầu
+              chuỗi đọc của khách này.
             </p>
             {form.meter_readings.map((m, i) => {
               const consumption = Number(m.reading) - m.prev_reading
               return (
-                <div key={m.meter_id} className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 p-3">
-                  <span className="w-16 font-medium text-slate-700">{m.type === '1' ? 'Điện' : 'Nước'}</span>
+                <div
+                  key={m.meter_id}
+                  className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 p-3"
+                >
+                  <span className="w-16 font-medium text-slate-700">
+                    {m.type === MeterType.Electric ? 'Điện' : 'Nước'}
+                  </span>
                   <span className="text-sm text-slate-500">
                     số cũ <b className="tabular-nums">{num(m.prev_reading)}</b> ({date(m.prev_read_date)})
                   </span>
@@ -443,15 +566,15 @@ export default function MoveIn() {
                     )}
                   </div>
                   <span className="text-sm tabular-nums text-slate-600">
-                    = {num(Math.max(0, consumption))} {m.type === '1' ? 'kWh' : 'm³'}
+                    = {num(Math.max(0, consumption))} {METER_UNIT[m.type]}
                   </span>
                 </div>
               )
             })}
 
             <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900">
-              ℹ Phần tiêu thụ trước mốc này thuộc khoảng phòng trống → ghi vào <b>chi phí của bạn</b>, không tính cho
-              khách mới.
+              ℹ Phần tiêu thụ trước mốc này thuộc khoảng phòng trống → ghi vào <b>chi phí của bạn</b>,
+              không tính cho khách mới.
             </div>
 
             <div className="card border-slate-200 bg-slate-50 p-4 text-sm">
@@ -460,7 +583,8 @@ export default function MoveIn() {
               <div>Tiền phòng: {moneyd(form.rent_amount)} / tháng</div>
               <div>Cọc: {moneyd(form.deposit_amount)}</div>
               <div>
-                Phí dịch vụ: {form.services.map((s) => `${s.name} ${money(s.unit_price)}`).join(' · ') || 'không có'}
+                Phí dịch vụ:{' '}
+                {form.services.map((s) => `${s.name} ${money(s.unit_price)}`).join(' · ') || 'không có'}
               </div>
             </div>
           </div>
@@ -486,7 +610,19 @@ export default function MoveIn() {
 }
 
 /** Bọc Field dùng chung, thêm tiện ích span 2 cột cho lưới form. */
-function Field({ label, children, span, error, hint }) {
+function Field({
+  label,
+  children,
+  span,
+  error,
+  hint,
+}: {
+  label?: string
+  children: ReactNode
+  span?: boolean
+  error?: string
+  hint?: string
+}) {
   return (
     <FormField label={label} error={error} hint={hint} className={span ? 'sm:col-span-2' : ''}>
       {children}

@@ -1,10 +1,9 @@
 import { Link } from 'react-router-dom'
-import { api } from '../lib/api'
-import { useApi } from '../lib/useApi'
-import { date, moneyd } from '../lib/format'
-import { Badge, CONTRACT_TONE, Empty, ErrorBox, Spinner } from '../components/ui'
-
-const STATUS_LABEL = { 1: 'Nháp', 2: 'Hiệu lực', 3: 'Đã kết thúc', 4: 'Đã huỷ' }
+import { api } from '@/lib/api'
+import { useApi } from '@/lib/useApi'
+import { date, moneyd } from '@/lib/format'
+import { Badge, Empty, ErrorBox, Spinner } from '@/components/ui'
+import { CONTRACT_STATUS_LABEL, CONTRACT_TONE, ContractStatus, RoomStatus } from '@/types'
 
 export default function Contracts() {
   const { data, error, loading, reload } = useApi(() => api.contracts(), [])
@@ -12,8 +11,9 @@ export default function Contracts() {
 
   if (loading) return <Spinner />
   if (error) return <ErrorBox error={error} onRetry={reload} />
+  if (!data) return null
 
-  const vacant = (roomsQuery.data?.rows ?? []).filter((r) => r.status === '1')
+  const vacant = (roomsQuery.data?.rows ?? []).filter((r) => r.status === RoomStatus.Vacant)
 
   return (
     <div className="space-y-4">
@@ -60,16 +60,17 @@ export default function Contracts() {
                     <div className="text-xs text-slate-400">{c.tenant_phone}</div>
                   </td>
                   <td className="px-3 py-2 text-xs text-slate-600">
-                    {date(c.start_date)} → {c.actual_end_date ? date(c.actual_end_date) : c.end_date ? date(c.end_date) : 'không hạn'}
+                    {date(c.start_date)} →{' '}
+                    {c.actual_end_date ? date(c.actual_end_date) : c.end_date ? date(c.end_date) : 'không hạn'}
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">{moneyd(c.rent_amount)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-500">{moneyd(c.deposit_held)}</td>
                   <td className="px-3 py-2 text-center tabular-nums">{c.occupant_count}</td>
                   <td className="px-3 py-2">
-                    <Badge tone={CONTRACT_TONE[c.status]}>{STATUS_LABEL[c.status]}</Badge>
+                    <Badge tone={CONTRACT_TONE[c.status]}>{CONTRACT_STATUS_LABEL[c.status]}</Badge>
                   </td>
                   <td className="px-3 py-2 text-right">
-                    {c.status === '2' && (
+                    {c.status === ContractStatus.Active && (
                       <Link to={`/contracts/${c.id}/move-out`} className="text-xs text-sky-700 hover:underline">
                         Trả phòng
                       </Link>

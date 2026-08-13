@@ -3,7 +3,7 @@
 Ứng dụng web quản lý nhà trọ quy mô nhỏ: **1 chủ sở hữu · 2 toà · 6 phòng · điện nước theo chỉ số đồng hồ**.
 
 - **Backend** — Laravel 13 (PHP 8.4), API JSON, SQLite mặc định
-- **Frontend** — React 19 + Vite + Tailwind v4
+- **Frontend** — React 19 + **TypeScript** (strict) + Vite + Tailwind v4
 - **Tài liệu thiết kế** — [`docs/`](docs/)
 
 ---
@@ -92,15 +92,21 @@ nha-tro/
 │   ├── lang/vi/validation.php           thông điệp validate tiếng Việt
 │   └── routes/api.php
 └── frontend/src/
-    ├── pages/                    Dashboard, Readings, Billing, Invoices, MoveIn, MoveOut…
+    ├── types/
+    │   ├── codes.ts             mã CHAR(1) + nhãn — đối chiếu App\Enums\Code
+    │   ├── domain.ts            thực thể nghiệp vụ — đối chiếu model Eloquent
+    │   └── api.ts               payload + response từng endpoint
+    ├── pages/                   Dashboard, Readings, Billing, Invoices, MoveIn, MoveOut…
     ├── lib/
-    │   ├── api.js                api client, bóc message lỗi tiếng Việt
-    │   ├── format.js             format tiền/ngày kiểu VN
-    │   ├── messages.js           từ điển nhãn field + khuôn thông điệp
-    │   └── validate.js           luật validate phía client
+    │   ├── api.ts               api client có kiểu, bóc message lỗi tiếng Việt
+    │   ├── format.ts            format tiền/ngày kiểu VN
+    │   ├── messages.ts          từ điển nhãn field + khuôn thông điệp
+    │   ├── validate.ts          luật validate phía client
+    │   └── useApi.ts            hook fetch generic
     └── components/
-        ├── ui.jsx                Badge, Modal, Toast, Spinner, Field
-        └── confirm.jsx           hộp thoại xác nhận dạng promise
+        ├── ui.tsx               Badge, Modal, Toast, Spinner, Field
+        ├── confirm.tsx          hộp thoại xác nhận dạng promise
+        └── PaymentModal.tsx     form thu tiền dùng chung
 ```
 
 ---
@@ -186,6 +192,36 @@ Ba guard ở backend đáng chú ý:
   `required_with` kích hoạt cả khi truyền `0`.
 
 Chi tiết đầy đủ: [`docs/03-admin-flow.md`](docs/03-admin-flow.md) mục 10.
+
+### TypeScript — ba tầng type
+
+`strict: true`, không còn file `.js`/`.jsx` nào. `npm run build` chạy `tsc --noEmit` trước,
+nên sai kiểu là build fail chứ không lọt ra runtime. Kiểm nhanh: `npm run typecheck`.
+
+| Tầng | File | Đối chiếu backend |
+|---|---|---|
+| Mã phân loại | [`types/codes.ts`](frontend/src/types/codes.ts) | `App\Enums\Code` |
+| Thực thể | [`types/domain.ts`](frontend/src/types/domain.ts) | model Eloquent |
+| Hợp đồng API | [`types/api.ts`](frontend/src/types/api.ts) | response từng controller |
+
+**Mã `CHAR(1)` dùng object `as const` + union**, không dùng `enum` của TS — vì dữ liệu đến từ
+JSON là chuỗi thô, `enum` sẽ buộc cast ở mọi ranh giới API:
+
+```ts
+export const InvoiceStatus = { Draft: '1', Issued: '2', /* … */ } as const
+export type InvoiceStatus = (typeof InvoiceStatus)[keyof typeof InvoiceStatus]
+```
+
+Chỗ trả lãi rõ nhất là `Record<Union, string>` cho các bảng nhãn: thêm mã mới vào union mà quên
+khai nhãn là **lỗi compile**, không phải `undefined` hiện lên UI.
+
+Sáu loại lỗi đã kiểm chứng là bị chặn: mã trạng thái lạ · tra nhãn bằng mã lạ · khoá field
+không có trong từ điển messages · đọc field không tồn tại trên `Invoice` · payload thu tiền
+thiếu field bắt buộc · gán chuỗi vào field tiền.
+
+> **Type viết tay sẽ trôi khỏi backend.** TypeScript không biết Laravel trả gì — nó chỉ tin
+> `types/api.ts`. Sửa response ở controller thì phải sửa file này **trong cùng commit**, nếu
+> không bạn có cảm giác an toàn giả, tệ hơn là không có type.
 
 ### Hệ thống log theo ngày
 

@@ -1,19 +1,26 @@
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { ToastProvider } from './components/ui'
-import { ConfirmProvider } from './components/confirm'
-import Dashboard from './pages/Dashboard'
-import Readings from './pages/Readings'
-import Billing from './pages/Billing'
-import Invoices from './pages/Invoices'
-import InvoiceDetail from './pages/InvoiceDetail'
-import Contracts from './pages/Contracts'
-import MoveIn from './pages/MoveIn'
-import MoveOut from './pages/MoveOut'
-import Expenses from './pages/Expenses'
-import Report from './pages/Report'
-import Settings from './pages/Settings'
+import type { ReactNode } from 'react'
+import { ToastProvider } from '@/components/ui'
+import { ConfirmProvider } from '@/components/confirm'
+import Dashboard from '@/pages/Dashboard'
+import Readings from '@/pages/Readings'
+import Billing from '@/pages/Billing'
+import Invoices from '@/pages/Invoices'
+import InvoiceDetail from '@/pages/InvoiceDetail'
+import Contracts from '@/pages/Contracts'
+import MoveIn from '@/pages/MoveIn'
+import MoveOut from '@/pages/MoveOut'
+import Expenses from '@/pages/Expenses'
+import Report from '@/pages/Report'
+import Settings from '@/pages/Settings'
 
-const NAV = [
+interface NavItem {
+  to: string
+  label: string
+  end?: boolean
+}
+
+const NAV: NavItem[] = [
   { to: '/', label: 'Tổng quan', end: true },
   { to: '/readings', label: 'Ghi số' },
   { to: '/billing', label: 'Chốt sổ' },
@@ -24,7 +31,7 @@ const NAV = [
   { to: '/settings', label: 'Cấu hình' },
 ]
 
-function Layout({ children }) {
+function Layout({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/90 backdrop-blur">

@@ -1,13 +1,28 @@
 import { useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api } from '../lib/api'
-import { useApi } from '../lib/useApi'
-import { date, num, period } from '../lib/format'
-import { Badge, ErrorBox, Spinner, useToast } from '../components/ui'
-import { useConfirm } from '../components/confirm'
-import { msg } from '../lib/messages'
+import { api } from '@/lib/api'
+import { useApi } from '@/lib/useApi'
+import { currentPeriod, date, monthInputToPeriod, num, period, periodToMonthInput } from '@/lib/format'
+import { Badge, ErrorBox, Spinner, useToast } from '@/components/ui'
+import { useConfirm } from '@/components/confirm'
+import { msg } from '@/lib/messages'
+import {
+  MeterType,
+  RoomStatus,
+  type BulkReadingEntry,
+  type PeriodYm,
+  type SheetMeter,
+  type SheetRow,
+} from '@/types'
 
-const EMPTY_ROWS = []
+/** Kết quả tính cho một ô nhập: số tiêu thụ + cảnh báo + lỗi. */
+interface ComputedCell {
+  consumption: number
+  warnings: string[]
+  errors: string[]
+}
+
+const EMPTY_ROWS: SheetRow[] = []
 
 /**
  * Màn hình ghi số điện nước — một trang, một bảng, 12 ô nhập.
@@ -21,19 +36,17 @@ export default function Readings() {
   const toast = useToast()
   const confirm = useConfirm()
 
-  const [currentPeriod, setCurrentPeriod] = useState(
-    () => params.get('period') || new Date().toISOString().slice(0, 7).replace('-', ''),
-  )
+  const [viewPeriod, setViewPeriod] = useState<PeriodYm>(() => params.get('period') ?? currentPeriod())
   const [readDate, setReadDate] = useState('')
-  const [values, setValues] = useState({})
-  const [changed, setChanged] = useState({})
+  const [values, setValues] = useState<Record<number, string>>({})
+  const [changed, setChanged] = useState<Record<number, boolean>>({})
   const [saving, setSaving] = useState(false)
 
   const { data, error, loading, reload } = useApi(
     () =>
-      api.readingSheet(currentPeriod).then((res) => {
+      api.readingSheet(viewPeriod).then((res) => {
         setReadDate(res.default_read_date)
-        const initial = {}
+        const initial: Record<number, string> = {}
         res.rows.forEach((row) =>
           row.meters.forEach((m) => {
             if (m.existing) initial[m.meter_id] = String(m.existing.reading)
@@ -43,15 +56,16 @@ export default function Readings() {
         setChanged({})
         return res
       }),
-    [currentPeriod],
+    [viewPeriod],
   )
 
   // Hằng số ngoài render: `?? []` tạo mảng mới mỗi lần, làm useMemo bên dưới
   // tính lại vô ích ở mọi lần render.
   const rows = data?.rows ?? EMPTY_ROWS
 
-  const computed = useMemo(() => {
-    const out = {}
+  const computed = useMemo<Record<number, ComputedCell>>(() => {
+    const out: Record<number, ComputedCell> = {}
+
     rows.forEach((row) =>
       row.meters.forEach((m) => {
         const raw = values[m.meter_id]
@@ -67,9 +81,9 @@ export default function Readings() {
             : curr - m.prev_reading
 
         // Vị trí trong bảng — cảnh báo phải nói rõ dòng nào mới dùng được.
-        const where = `${row.room_code} ${m.type === '1' ? 'điện' : 'nước'}`
-        const warnings = []
-        const errors = []
+        const where = `${row.room_code} ${m.type === MeterType.Electric ? 'điện' : 'nước'}`
+        const warnings: string[] = []
+        const errors: string[] = []
 
         // Lỗi: chặn lưu. Cảnh báo: cho lưu nhưng phải xác nhận.
         if (Number.isNaN(Number(raw))) errors.push(msg('readNotNumber', null, { where }))
@@ -77,7 +91,9 @@ export default function Readings() {
         if (m.existing?.is_billed) errors.push(msg('readBilled', null, { where }))
 
         if (rolled && !changed[m.meter_id]) warnings.push(msg('readRollover', null, { where }))
-        if (consumption === 0 && row.room_status === '2') warnings.push(msg('readZero', null, { where }))
+        if (consumption === 0 && row.room_status === RoomStatus.Occupied) {
+          warnings.push(msg('readZero', null, { where }))
+        }
         if (m.avg_consumption && m.avg_consumption > 0 && consumption > m.avg_consumption * 2) {
           warnings.push(
             msg('readTooHigh', null, {
@@ -92,6 +108,7 @@ export default function Readings() {
         out[m.meter_id] = { consumption: Math.round(consumption * 100) / 100, warnings, errors }
       }),
     )
+
     return out
   }, [rows, values, changed])
 
@@ -118,7 +135,8 @@ export default function Readings() {
 
     setSaving(true)
     try {
-      const entries = []
+      const entries: BulkReadingEntry[] = []
+
       rows.forEach((row) => {
         if (row.blocked) return
         row.meters.forEach((m) => {
@@ -139,7 +157,7 @@ export default function Readings() {
       }
 
       const result = await api.saveReadings({
-        period_ym: currentPeriod,
+        period_ym: viewPeriod,
         read_date: readDate,
         entries,
       })
@@ -147,7 +165,7 @@ export default function Readings() {
       toast.success(`Đã lưu ${result.saved} chỉ số.`)
       reload()
     } catch (err) {
-      toast.error(err.message)
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
       setSaving(false)
     }
@@ -161,7 +179,7 @@ export default function Readings() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-slate-900">Ghi số điện nước</h1>
-          <p className="text-sm text-slate-500">Kỳ {period(currentPeriod)}</p>
+          <p className="text-sm text-slate-500">Kỳ {period(viewPeriod)}</p>
         </div>
         <div className="flex items-end gap-3">
           <div>
@@ -169,13 +187,18 @@ export default function Readings() {
             <input
               type="month"
               className="field"
-              value={`${currentPeriod.slice(0, 4)}-${currentPeriod.slice(4, 6)}`}
-              onChange={(e) => setCurrentPeriod(e.target.value.replace('-', ''))}
+              value={periodToMonthInput(viewPeriod)}
+              onChange={(e) => setViewPeriod(monthInputToPeriod(e.target.value))}
             />
           </div>
           <div>
             <label className="label">Ngày ghi thực tế</label>
-            <input type="date" className="field" value={readDate} onChange={(e) => setReadDate(e.target.value)} />
+            <input
+              type="date"
+              className="field"
+              value={readDate}
+              onChange={(e) => setReadDate(e.target.value)}
+            />
           </div>
         </div>
       </div>
@@ -196,8 +219,8 @@ export default function Readings() {
           </thead>
           <tbody className="divide-y divide-slate-100">
             {rows.map((row) => {
-              const electric = row.meters.find((m) => m.type === '1')
-              const water = row.meters.find((m) => m.type === '2')
+              const electric = row.meters.find((m) => m.type === MeterType.Electric)
+              const water = row.meters.find((m) => m.type === MeterType.Water)
 
               return (
                 <tr key={row.room_id} className={row.blocked ? 'bg-amber-50/60' : ''}>
@@ -214,19 +237,26 @@ export default function Readings() {
                     <>
                       <MeterCells
                         meter={electric}
-                        value={values[electric?.meter_id] ?? ''}
-                        computed={computed[electric?.meter_id]}
-                        changed={!!changed[electric?.meter_id]}
-                        onChange={(v) => setValues((s) => ({ ...s, [electric.meter_id]: v }))}
-                        onToggleChanged={() => setChanged((s) => ({ ...s, [electric.meter_id]: !s[electric.meter_id] }))}
+                        value={electric ? (values[electric.meter_id] ?? '') : ''}
+                        computed={electric ? computed[electric.meter_id] : undefined}
+                        changed={electric ? !!changed[electric.meter_id] : false}
+                        onChange={(v) =>
+                          electric && setValues((s) => ({ ...s, [electric.meter_id]: v }))
+                        }
+                        onToggleChanged={() =>
+                          electric &&
+                          setChanged((s) => ({ ...s, [electric.meter_id]: !s[electric.meter_id] }))
+                        }
                       />
                       <MeterCells
                         meter={water}
-                        value={values[water?.meter_id] ?? ''}
-                        computed={computed[water?.meter_id]}
-                        changed={!!changed[water?.meter_id]}
-                        onChange={(v) => setValues((s) => ({ ...s, [water.meter_id]: v }))}
-                        onToggleChanged={() => setChanged((s) => ({ ...s, [water.meter_id]: !s[water.meter_id] }))}
+                        value={water ? (values[water.meter_id] ?? '') : ''}
+                        computed={water ? computed[water.meter_id] : undefined}
+                        changed={water ? !!changed[water.meter_id] : false}
+                        onChange={(v) => water && setValues((s) => ({ ...s, [water.meter_id]: v }))}
+                        onToggleChanged={() =>
+                          water && setChanged((s) => ({ ...s, [water.meter_id]: !s[water.meter_id] }))
+                        }
                       />
                     </>
                   )}
@@ -291,7 +321,11 @@ export default function Readings() {
           >
             Huỷ thay đổi
           </button>
-          <button className="btn-primary" onClick={save} disabled={saving || filled === 0 || allErrors.length > 0}>
+          <button
+            className="btn-primary"
+            onClick={save}
+            disabled={saving || filled === 0 || allErrors.length > 0}
+          >
             {saving ? 'Đang lưu…' : `LƯU ${filled}/${totalMeters} DÒNG`}
           </button>
         </div>
@@ -300,14 +334,29 @@ export default function Readings() {
   )
 }
 
-function MeterCells({ meter, value, computed, changed, onChange, onToggleChanged }) {
-  if (!meter) return <td colSpan={3} className="px-3 py-2 text-xs text-slate-400">—</td>
+interface MeterCellsProps {
+  meter: SheetMeter | undefined
+  value: string
+  computed: ComputedCell | undefined
+  changed: boolean
+  onChange: (value: string) => void
+  onToggleChanged: () => void
+}
 
-  const locked = meter.existing?.is_billed
+function MeterCells({ meter, value, computed, changed, onChange, onToggleChanged }: MeterCellsProps) {
+  if (!meter) {
+    return (
+      <td colSpan={3} className="px-3 py-2 text-xs text-slate-400">
+        —
+      </td>
+    )
+  }
+
+  const locked = meter.existing?.is_billed ?? false
 
   return (
     <>
-      <td className="px-3 py-2 text-right text-xs text-slate-500 tabular-nums">
+      <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-500">
         <div>{num(meter.prev_reading)}</div>
         <div className="text-[10px] text-slate-400">{date(meter.prev_read_date)}</div>
       </td>
@@ -331,7 +380,11 @@ function MeterCells({ meter, value, computed, changed, onChange, onToggleChanged
         {locked ? (
           <Badge tone="slate">đã chốt</Badge>
         ) : computed ? (
-          <span className={computed.warnings.length ? 'font-semibold text-amber-700' : 'font-semibold text-slate-800'}>
+          <span
+            className={
+              computed.warnings.length ? 'font-semibold text-amber-700' : 'font-semibold text-slate-800'
+            }
+          >
             {num(computed.consumption)}
             {computed.warnings.length > 0 && ' ⚠'}
           </span>

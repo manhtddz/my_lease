@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from 'react'
 import { Modal } from './ui'
 
 /**
@@ -8,18 +8,38 @@ import { Modal } from './ui'
  * mọi nút bấm, vì hỏi quá nhiều thì người dùng bấm Đồng ý theo phản xạ
  * và cảnh báo mất tác dụng.
  */
-const ConfirmCtx = createContext(async () => true)
 
-const TONE = {
+export type ConfirmTone = 'danger' | 'primary'
+
+export interface ConfirmOptions {
+  title?: string
+  message?: string
+  /** Danh sách hệ quả — hiện dạng bullet trong khung xám. */
+  details?: string[] | null
+  confirmLabel?: string
+  cancelLabel?: string
+  tone?: ConfirmTone
+}
+
+export type ConfirmFn = (options: ConfirmOptions) => Promise<boolean>
+
+/** Mặc định đồng ý — chỉ xảy ra khi component nằm ngoài provider. */
+const ConfirmCtx = createContext<ConfirmFn>(async () => true)
+
+const TONE: Record<ConfirmTone, { btn: string; icon: string }> = {
   danger: { btn: 'btn-danger', icon: '⚠' },
   primary: { btn: 'btn-primary', icon: '?' },
 }
 
-export function ConfirmProvider({ children }) {
-  const [state, setState] = useState(null)
-  const resolver = useRef(null)
+interface ConfirmState extends Required<Omit<ConfirmOptions, 'details'>> {
+  details: string[] | null
+}
 
-  const confirm = useCallback((options) => {
+export function ConfirmProvider({ children }: { children: ReactNode }) {
+  const [state, setState] = useState<ConfirmState | null>(null)
+  const resolver = useRef<((value: boolean) => void) | null>(null)
+
+  const confirm = useCallback<ConfirmFn>((options) => {
     setState({
       title: options.title ?? 'Xác nhận',
       message: options.message ?? '',
@@ -29,12 +49,12 @@ export function ConfirmProvider({ children }) {
       tone: options.tone ?? 'primary',
     })
 
-    return new Promise((resolve) => {
+    return new Promise<boolean>((resolve) => {
       resolver.current = resolve
     })
   }, [])
 
-  function close(result) {
+  function close(result: boolean) {
     resolver.current?.(result)
     resolver.current = null
     setState(null)
@@ -74,6 +94,6 @@ export function ConfirmProvider({ children }) {
   )
 }
 
-export function useConfirm() {
+export function useConfirm(): ConfirmFn {
   return useContext(ConfirmCtx)
 }

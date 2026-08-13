@@ -1,14 +1,12 @@
 import { useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api } from '../lib/api'
-import { useApi } from '../lib/useApi'
-import { date, money, period } from '../lib/format'
-import { Badge, Empty, ErrorBox, INVOICE_TONE, Spinner, useToast } from '../components/ui'
-import { useConfirm } from '../components/confirm'
-import PaymentModal from '../components/PaymentModal'
-import { moneyd } from '../lib/format'
-
-const STATUS_LABEL = { 1: 'Nháp', 2: 'Đã phát hành', 3: 'Trả một phần', 4: 'Đã trả đủ', 5: 'Đã huỷ' }
+import { api } from '@/lib/api'
+import { useApi } from '@/lib/useApi'
+import { date, money, moneyd, monthInputToPeriod, period, periodToMonthInput } from '@/lib/format'
+import { Badge, Empty, ErrorBox, Spinner, useToast } from '@/components/ui'
+import { useConfirm } from '@/components/confirm'
+import PaymentModal from '@/components/PaymentModal'
+import { INVOICE_STATUS_LABEL, INVOICE_TONE, InvoiceStatus, type Invoice } from '@/types'
 
 export default function Invoices() {
   const [params, setParams] = useSearchParams()
@@ -16,11 +14,11 @@ export default function Invoices() {
   const confirm = useConfirm()
   const [busy, setBusy] = useState(false)
   // Hoá đơn đang mở form thu tiền — null là đóng.
-  const [payTarget, setPayTarget] = useState(null)
+  const [payTarget, setPayTarget] = useState<Invoice | null>(null)
 
-  const periodFilter = params.get('period') || ''
-  const statusFilter = params.get('status') || ''
-  const roomFilter = params.get('room_id') || ''
+  const periodFilter = params.get('period') ?? ''
+  const statusFilter = params.get('status') ?? ''
+  const roomFilter = params.get('room_id') ?? ''
 
   const { data, error, loading, reload } = useApi(
     () =>
@@ -32,7 +30,7 @@ export default function Invoices() {
     [periodFilter, statusFilter, roomFilter],
   )
 
-  function setFilter(key, value) {
+  function setFilter(key: string, value: string) {
     const next = new URLSearchParams(params)
     if (value) {
       next.set(key, value)
@@ -42,17 +40,24 @@ export default function Invoices() {
     setParams(next)
   }
 
+  if (loading) return <Spinner />
+  if (error) return <ErrorBox error={error} onRetry={reload} />
+  if (!data) return null
+
+  const rows = data.rows
+  const drafts = rows.filter((r) => r.status === InvoiceStatus.Draft)
+  const totalDue = rows.reduce((s, r) => s + Math.max(0, r.remaining), 0)
+
   async function issueAll() {
     if (!periodFilter) {
       toast.error('Chọn kỳ trước khi phát hành hàng loạt.')
       return
     }
 
-    const draftRows = data.rows.filter((r) => r.status === '1')
     const agreed = await confirm({
-      title: `Phát hành ${draftRows.length} hoá đơn nháp?`,
-      message: `Tổng ${moneyd(draftRows.reduce((s, r) => s + r.total, 0))} sẽ chuyển sang trạng thái đã phát hành và tính vào công nợ.`,
-      details: draftRows.map((r) => `Phòng ${r.room_code} · ${r.tenant_name} · ${moneyd(r.total)}`),
+      title: `Phát hành ${drafts.length} hoá đơn nháp?`,
+      message: `Tổng ${moneyd(drafts.reduce((s, r) => s + r.total, 0))} sẽ chuyển sang trạng thái đã phát hành và tính vào công nợ.`,
+      details: drafts.map((r) => `Phòng ${r.room_code} · ${r.tenant_name} · ${moneyd(r.total)}`),
       confirmLabel: 'Phát hành tất cả',
     })
     if (!agreed) return
@@ -63,18 +68,32 @@ export default function Invoices() {
       toast.success(`Đã phát hành ${result.issued} hoá đơn.`)
       reload()
     } catch (err) {
-      toast.error(err.message)
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  if (loading) return <Spinner />
-  if (error) return <ErrorBox error={error} onRetry={reload} />
+  async function issueOne(invoice: Invoice) {
+    const agreed = await confirm({
+      title: 'Phát hành hoá đơn?',
+      message: `${invoice.code} · phòng ${invoice.room_code} · ${moneyd(invoice.total)}`,
+      details: ['Vẫn sửa được số liệu cho tới khi thu tiền lần đầu.'],
+      confirmLabel: 'Phát hành',
+    })
+    if (!agreed) return
 
-  const rows = data.rows
-  const drafts = rows.filter((r) => r.status === '1').length
-  const totalDue = rows.reduce((s, r) => s + Math.max(0, r.remaining), 0)
+    setBusy(true)
+    try {
+      await api.issueInvoice(invoice.id)
+      toast.success(`Đã phát hành ${invoice.code}.`)
+      reload()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -86,24 +105,28 @@ export default function Invoices() {
             <input
               type="month"
               className="field w-40"
-              value={periodFilter ? `${periodFilter.slice(0, 4)}-${periodFilter.slice(4, 6)}` : ''}
-              onChange={(e) => setFilter('period', e.target.value.replace('-', ''))}
+              value={periodFilter ? periodToMonthInput(periodFilter) : ''}
+              onChange={(e) => setFilter('period', monthInputToPeriod(e.target.value))}
             />
           </div>
           <div>
             <label className="label">Trạng thái</label>
-            <select className="field w-40" value={statusFilter} onChange={(e) => setFilter('status', e.target.value)}>
+            <select
+              className="field w-40"
+              value={statusFilter}
+              onChange={(e) => setFilter('status', e.target.value)}
+            >
               <option value="">Tất cả</option>
-              {Object.entries(STATUS_LABEL).map(([k, v]) => (
+              {Object.entries(INVOICE_STATUS_LABEL).map(([k, v]) => (
                 <option key={k} value={k}>
                   {v}
                 </option>
               ))}
             </select>
           </div>
-          {drafts > 0 && (
+          {drafts.length > 0 && (
             <button className="btn-primary" onClick={issueAll} disabled={busy}>
-              Phát hành {drafts} nháp
+              Phát hành {drafts.length} nháp
             </button>
           )}
         </div>
@@ -156,39 +179,20 @@ export default function Invoices() {
                     {r.remaining > 0 ? money(r.remaining) : '—'}
                   </td>
                   <td className="px-3 py-2">
-                    <Badge tone={INVOICE_TONE[r.status]}>{STATUS_LABEL[r.status]}</Badge>
+                    <Badge tone={INVOICE_TONE[r.status]}>{INVOICE_STATUS_LABEL[r.status]}</Badge>
                   </td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap">
+                  <td className="whitespace-nowrap px-3 py-2 text-right">
                     {/* Thu tiền là thao tác làm nhiều nhất — để ngay tại dòng, không phải vào chi tiết */}
-                    {r.remaining > 0 && r.status !== '1' && r.status !== '5' && (
+                    {r.remaining > 0 && r.status !== InvoiceStatus.Draft && r.status !== InvoiceStatus.Void && (
                       <button className="btn-primary px-3 py-1 text-xs" onClick={() => setPayTarget(r)}>
                         Thu tiền
                       </button>
                     )}
-                    {r.status === '1' && (
+                    {r.status === InvoiceStatus.Draft && (
                       <button
                         className="btn-ghost px-3 py-1 text-xs"
                         disabled={busy}
-                        onClick={async () => {
-                          const agreed = await confirm({
-                            title: 'Phát hành hoá đơn?',
-                            message: `${r.code} · phòng ${r.room_code} · ${moneyd(r.total)}`,
-                            details: ['Vẫn sửa được số liệu cho tới khi thu tiền lần đầu.'],
-                            confirmLabel: 'Phát hành',
-                          })
-                          if (!agreed) return
-
-                          setBusy(true)
-                          try {
-                            await api.issueInvoice(r.id)
-                            toast.success(`Đã phát hành ${r.code}.`)
-                            reload()
-                          } catch (err) {
-                            toast.error(err.message)
-                          } finally {
-                            setBusy(false)
-                          }
-                        }}
+                        onClick={() => issueOne(r)}
                       >
                         Phát hành
                       </button>
@@ -214,13 +218,14 @@ export default function Invoices() {
         invoice={payTarget}
         onClose={() => setPayTarget(null)}
         onSubmit={async (payload) => {
+          if (!payTarget) return
           try {
             await api.pay(payTarget.id, payload)
             toast.success(`Đã thu ${moneyd(payload.amount)} cho ${payTarget.code}.`)
             setPayTarget(null)
             reload()
           } catch (err) {
-            toast.error(err.message)
+            toast.error(err instanceof Error ? err.message : String(err))
           }
         }}
       />

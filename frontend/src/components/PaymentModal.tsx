@@ -1,29 +1,45 @@
 import { useEffect, useState } from 'react'
 import { Field, Modal } from './ui'
 import { useConfirm } from './confirm'
-import { moneyd, todayISO } from '../lib/format'
-import { check, compact, positive, required } from '../lib/validate'
+import { moneyd, todayISO } from '@/lib/format'
+import { check, compact, hasErrors, positive, required, type Errors } from '@/lib/validate'
+import { PaymentMethod, type PaymentPayload } from '@/types'
+
+/** Chỉ cần vài field của hoá đơn để thu tiền — nhận cả Invoice đầy đủ lẫn dòng danh sách. */
+export interface PayableInvoice {
+  id: number
+  code: string | null
+  room_code?: string | null
+  tenant_name?: string | null
+  remaining: number
+}
+
+export interface PaymentModalProps {
+  /** null = đóng modal. */
+  invoice: PayableInvoice | null
+  onClose: () => void
+  onSubmit: (payload: PaymentPayload) => Promise<void> | void
+}
+
+type PaymentField = 'amount' | 'paid_at' | 'ref_no'
 
 /**
  * Form thu tiền — dùng chung ở trang chi tiết hoá đơn và ở danh sách hoá đơn.
- *
- * `invoice` cần: { id, code, room_code, tenant_name, remaining }
- * Truyền `invoice = null` để đóng.
  */
-export default function PaymentModal({ invoice, onClose, onSubmit }) {
+export default function PaymentModal({ invoice, onClose, onSubmit }: PaymentModalProps) {
   const confirm = useConfirm()
   const [amount, setAmount] = useState('')
-  const [paidAt, setPaidAt] = useState(todayISO())
-  const [method, setMethod] = useState('1')
+  const [paidAt, setPaidAt] = useState<string>(todayISO())
+  const [method, setMethod] = useState<PaymentMethod>(PaymentMethod.Cash)
   const [refNo, setRefNo] = useState('')
-  const [errors, setErrors] = useState({})
+  const [errors, setErrors] = useState<Errors<PaymentField>>({})
   const [busy, setBusy] = useState(false)
 
-  // Mở hoá đơn nào thì prefill đúng số nợ của hoá đơn đó — trường hợp
-  // thường gặp nhất là khách trả đủ.
   const invoiceId = invoice?.id
   const remaining = invoice?.remaining
 
+  // Mở hoá đơn nào thì prefill đúng số nợ của hoá đơn đó — trường hợp
+  // thường gặp nhất là khách trả đủ.
   useEffect(() => {
     if (invoiceId !== undefined) {
       setAmount(String(remaining))
@@ -34,18 +50,18 @@ export default function PaymentModal({ invoice, onClose, onSubmit }) {
 
   if (!invoice) return null
 
-  function validate() {
-    const clean = compact({
+  function validate(): boolean {
+    const clean = compact<PaymentField>({
       amount: check('amount', amount, [required, positive]),
       paid_at: check('paid_at', paidAt, [required]),
-      ref_no: method === '2' ? check('ref_no', refNo, [required]) : null,
+      ref_no: method === PaymentMethod.Transfer ? check('ref_no', refNo, [required]) : null,
     })
     setErrors(clean)
-    return Object.keys(clean).length === 0
+    return !hasErrors(clean)
   }
 
   async function submit() {
-    if (!validate()) return
+    if (!validate() || !invoice) return
 
     const value = Number(amount)
 
@@ -90,15 +106,19 @@ export default function PaymentModal({ invoice, onClose, onSubmit }) {
             <input type="date" className="field" value={paidAt} onChange={(e) => setPaidAt(e.target.value)} />
           </Field>
           <Field label="Hình thức">
-            <select className="field" value={method} onChange={(e) => setMethod(e.target.value)}>
-              <option value="1">Tiền mặt</option>
-              <option value="2">Chuyển khoản</option>
-              <option value="3">Khác</option>
+            <select
+              className="field"
+              value={method}
+              onChange={(e) => setMethod(e.target.value as PaymentMethod)}
+            >
+              <option value={PaymentMethod.Cash}>Tiền mặt</option>
+              <option value={PaymentMethod.Transfer}>Chuyển khoản</option>
+              <option value={PaymentMethod.Other}>Khác</option>
             </select>
           </Field>
         </div>
 
-        {method === '2' && (
+        {method === PaymentMethod.Transfer && (
           <Field label="Mã giao dịch" error={errors.ref_no}>
             <input className="field" value={refNo} onChange={(e) => setRefNo(e.target.value)} />
           </Field>

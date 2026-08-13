@@ -1,63 +1,97 @@
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api } from '../lib/api'
-import { useApi } from '../lib/useApi'
-import { date, money, moneyd, num, period } from '../lib/format'
-import { Badge, ErrorBox, INVOICE_TONE, Spinner, useToast } from '../components/ui'
-import { useConfirm } from '../components/confirm'
-import PaymentModal from '../components/PaymentModal'
-import { check, compact, max, notNegative, required } from '../lib/validate'
-import { msg } from '../lib/messages'
+import { api } from '@/lib/api'
+import { useApi } from '@/lib/useApi'
+import { date, money, moneyd, num, period } from '@/lib/format'
+import { Badge, ErrorBox, Spinner, useToast } from '@/components/ui'
+import { useConfirm } from '@/components/confirm'
+import PaymentModal from '@/components/PaymentModal'
+import { msg } from '@/lib/messages'
+import {
+  check,
+  compact,
+  hasErrors,
+  max,
+  notNegative,
+  required,
+  type Errors,
+} from '@/lib/validate'
+import {
+  INVOICE_STATUS_LABEL,
+  INVOICE_TONE,
+  InvoiceStatus,
+  PAYMENT_KIND_LABEL,
+  PAYMENT_METHOD_LABEL,
+  type Payment,
+} from '@/types'
 
-const STATUS_LABEL = { 1: 'Nháp', 2: 'Đã phát hành', 3: 'Trả một phần', 4: 'Đã trả đủ', 5: 'Đã huỷ' }
-const METHOD_LABEL = { 1: 'Tiền mặt', 2: 'Chuyển khoản', 3: 'Khác' }
-const KIND_LABEL = { 1: 'Tiền thuê / dịch vụ', 2: 'Thu cọc', 3: 'Hoàn cọc', 4: 'Khác' }
+/** Bản nháp đang sửa của một dòng hoá đơn — giữ dạng chuỗi vì đến từ input. */
+interface DraftLine {
+  id: number
+  quantity: string
+  unit_price: string
+}
 
 export default function InvoiceDetail() {
-  const { id } = useParams()
+  const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const toast = useToast()
   const confirm = useConfirm()
+
   const [busy, setBusy] = useState(false)
   const [payOpen, setPayOpen] = useState(false)
   const [editing, setEditing] = useState(false)
-  const [draftLines, setDraftLines] = useState([])
+  const [draftLines, setDraftLines] = useState<DraftLine[]>([])
   const [draftDiscount, setDraftDiscount] = useState('0')
-  const [editErrors, setEditErrors] = useState({})
+  const [editErrors, setEditErrors] = useState<Errors>({})
 
-  const { data, error, loading, reload } = useApi(() => api.invoice(id), [id])
+  const { data, error, loading, reload } = useApi(() => api.invoice(id!), [id])
 
   if (loading) return <Spinner />
   if (error) return <ErrorBox error={error} onRetry={reload} />
+  if (!data) return null
 
   const { invoice, details, payments, owner } = data
-  const isDraft = invoice.status === '1'
-  const isVoid = invoice.status === '5'
-
-  function startEditing() {
-    setDraftLines(details.map((d) => ({ id: d.id, quantity: String(d.quantity), unit_price: String(d.unit_price) })))
-    setDraftDiscount(String(invoice.discount))
-    setEditing(true)
-  }
-
-  function patchLine(lineId, key, value) {
-    setDraftLines((lines) => lines.map((l) => (l.id === lineId ? { ...l, [key]: value } : l)))
-  }
+  const isDraft = invoice.status === InvoiceStatus.Draft
+  const isVoid = invoice.status === InvoiceStatus.Void
 
   const draftSubtotal = draftLines.reduce(
     (sum, l) => sum + Math.round((Number(l.quantity) || 0) * (Number(l.unit_price) || 0)),
     0,
   )
 
+  function startEditing() {
+    setDraftLines(
+      details.map((d) => ({ id: d.id, quantity: String(d.quantity), unit_price: String(d.unit_price) })),
+    )
+    setDraftDiscount(String(invoice.discount))
+    setEditing(true)
+  }
+
+  function patchLine(lineId: number, key: 'quantity' | 'unit_price', value: string) {
+    setDraftLines((lines) => lines.map((l) => (l.id === lineId ? { ...l, [key]: value } : l)))
+  }
+
+  async function act(fn: () => Promise<unknown>, successMessage: string) {
+    setBusy(true)
+    try {
+      await fn()
+      toast.success(successMessage)
+      reload()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   /** Kiểm tra từng ô số lượng / đơn giá trước khi gọi API. */
-  function validateEdits() {
-    const errors = {}
+  function validateEdits(): boolean {
+    const errors: Record<string, string | null> = {}
 
     draftLines.forEach((line) => {
-      const qtyError = check('quantity', line.quantity, [required, notNegative])
-      const priceError = check('unit_price', line.unit_price, [required, notNegative])
-      if (qtyError) errors[`qty-${line.id}`] = qtyError
-      if (priceError) errors[`price-${line.id}`] = priceError
+      errors[`qty-${line.id}`] = check('quantity', line.quantity, [required, notNegative])
+      errors[`price-${line.id}`] = check('unit_price', line.unit_price, [required, notNegative])
     })
 
     errors.discount = check('discount', draftDiscount, [
@@ -68,7 +102,7 @@ export default function InvoiceDetail() {
 
     const clean = compact(errors)
     setEditErrors(clean)
-    return Object.keys(clean).length === 0
+    return !hasErrors(clean)
   }
 
   async function saveEdits() {
@@ -85,7 +119,7 @@ export default function InvoiceDetail() {
         if (Math.abs(Number(line.quantity) - original.quantity) < 0.0001) return null
         return `${original.description.split(' (')[0]}: ${num(original.quantity)} → ${num(line.quantity)}`
       })
-      .filter(Boolean)
+      .filter((v): v is string => v !== null)
 
     const newTotal = draftSubtotal - (Number(draftDiscount) || 0) + invoice.carried_over
 
@@ -101,7 +135,7 @@ export default function InvoiceDetail() {
 
     setBusy(true)
     try {
-      const result = await api.updateInvoiceDetails(id, {
+      const result = await api.updateInvoiceDetails(id!, {
         details: draftLines.map((l) => ({
           id: l.id,
           quantity: Number(l.quantity),
@@ -115,7 +149,9 @@ export default function InvoiceDetail() {
         parts.push(`Đã ghi ngược ${result.synced.length} chỉ số về sổ đồng hồ.`)
       }
       if (result.unsynced.length) {
-        parts.push(`Không đồng bộ được sổ đồng hồ cho: ${result.unsynced.join(', ')} (dòng gộp nhiều lần đọc).`)
+        parts.push(
+          `Không đồng bộ được sổ đồng hồ cho: ${result.unsynced.join(', ')} (dòng gộp nhiều lần đọc).`,
+        )
       }
       toast.success(parts.join('\n'))
 
@@ -123,23 +159,89 @@ export default function InvoiceDetail() {
       setEditErrors({})
       reload()
     } catch (err) {
-      toast.error(err.message)
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  async function act(fn, successMessage) {
-    setBusy(true)
-    try {
-      await fn()
-      toast.success(successMessage)
-      reload()
-    } catch (err) {
-      toast.error(err.message)
-    } finally {
-      setBusy(false)
+  async function cancelEditing() {
+    const dirty = draftLines.some((line) => {
+      const original = details.find((d) => d.id === line.id)
+      if (!original) return false
+      return Number(line.quantity) !== original.quantity || Number(line.unit_price) !== original.unit_price
+    })
+
+    if (dirty) {
+      const agreed = await confirm({
+        title: 'Bỏ thay đổi?',
+        message: 'Các số bạn vừa sửa sẽ không được lưu.',
+        confirmLabel: 'Bỏ thay đổi',
+        tone: 'danger',
+      })
+      if (!agreed) return
     }
+
+    setEditing(false)
+    setEditErrors({})
+  }
+
+  async function issue() {
+    const agreed = await confirm({
+      title: 'Phát hành hoá đơn?',
+      message: `Hoá đơn ${invoice.code} · ${moneyd(invoice.total)} sẽ chuyển sang trạng thái đã phát hành.`,
+      details: [
+        'Sau khi phát hành vẫn sửa được số liệu, cho tới khi thu tiền lần đầu.',
+        'Hoá đơn bắt đầu tính vào công nợ của khách.',
+      ],
+      confirmLabel: 'Phát hành',
+    })
+    if (agreed) act(() => api.issueInvoice(id!), 'Đã phát hành.')
+  }
+
+  async function removeInvoice() {
+    const agreed = await confirm({
+      title: isDraft ? 'Xoá hoá đơn nháp?' : 'Huỷ hoá đơn đã phát hành?',
+      message: isDraft
+        ? `Hoá đơn nháp ${invoice.code} sẽ bị xoá.`
+        : `Hoá đơn ${invoice.code} · ${moneyd(invoice.total)} sẽ chuyển sang trạng thái đã huỷ.`,
+      details: isDraft
+        ? ['Chỉ số điện nước quay lại hàng chờ, chốt sổ lại được.']
+        : [
+            'Chỉ số điện nước quay lại hàng chờ để chốt sổ lại.',
+            'Bản ghi hoá đơn vẫn giữ để còn dấu vết, không xoá hẳn.',
+            'Chốt sổ lại sẽ sinh hoá đơn mã mới.',
+          ],
+      confirmLabel: isDraft ? 'Xoá nháp' : 'Huỷ hoá đơn',
+      tone: 'danger',
+    })
+    if (!agreed) return
+
+    const reason = isDraft
+      ? null
+      : window.prompt('Lý do huỷ (ghi vào lịch sử hoá đơn):') || 'không ghi lý do'
+
+    act(
+      async () => {
+        await api.deleteInvoice(id!, reason)
+        if (isDraft) navigate('/invoices')
+      },
+      isDraft ? 'Đã xoá hoá đơn nháp.' : 'Đã huỷ hoá đơn, chỉ số trả về hàng chờ.',
+    )
+  }
+
+  async function removePayment(p: Payment) {
+    const agreed = await confirm({
+      title: 'Xoá giao dịch thu tiền?',
+      message: `Giao dịch ${moneyd(p.amount)} ngày ${date(p.paid_at)} sẽ bị xoá.`,
+      details: [
+        'Công nợ của hoá đơn tăng trở lại tương ứng.',
+        'Dùng khi ghi nhầm số tiền, không dùng để hoàn tiền cho khách.',
+      ],
+      confirmLabel: 'Xoá giao dịch',
+      tone: 'danger',
+    })
+    if (agreed) act(() => api.deletePayment(p.id), 'Đã xoá giao dịch.')
   }
 
   return (
@@ -151,7 +253,7 @@ export default function InvoiceDetail() {
           </Link>
           <h1 className="mt-1 flex items-center gap-2 text-xl font-bold text-slate-900">
             {invoice.code}
-            <Badge tone={INVOICE_TONE[invoice.status]}>{STATUS_LABEL[invoice.status]}</Badge>
+            <Badge tone={INVOICE_TONE[invoice.status]}>{INVOICE_STATUS_LABEL[invoice.status]}</Badge>
             {invoice.is_settlement && <Badge tone="amber">Tất toán trả phòng</Badge>}
           </h1>
           <p className="text-sm text-slate-500">
@@ -163,29 +265,7 @@ export default function InvoiceDetail() {
         <div className="flex flex-wrap gap-2">
           {editing ? (
             <>
-              <button
-                className="btn-ghost"
-                disabled={busy}
-                onClick={async () => {
-                  const dirty = draftLines.some((line) => {
-                    const original = details.find((d) => d.id === line.id)
-                    return (
-                      Number(line.quantity) !== original.quantity || Number(line.unit_price) !== original.unit_price
-                    )
-                  })
-                  if (dirty) {
-                    const agreed = await confirm({
-                      title: 'Bỏ thay đổi?',
-                      message: 'Các số bạn vừa sửa sẽ không được lưu.',
-                      confirmLabel: 'Bỏ thay đổi',
-                      tone: 'danger',
-                    })
-                    if (!agreed) return
-                  }
-                  setEditing(false)
-                  setEditErrors({})
-                }}
-              >
+              <button className="btn-ghost" disabled={busy} onClick={cancelEditing}>
                 Huỷ sửa
               </button>
               <button className="btn-primary" onClick={saveEdits} disabled={busy}>
@@ -200,22 +280,7 @@ export default function InvoiceDetail() {
             )
           )}
           {isDraft && !editing && (
-            <button
-              className="btn-primary"
-              disabled={busy}
-              onClick={async () => {
-                const agreed = await confirm({
-                  title: 'Phát hành hoá đơn?',
-                  message: `Hoá đơn ${invoice.code} · ${moneyd(invoice.total)} sẽ chuyển sang trạng thái đã phát hành.`,
-                  details: [
-                    'Sau khi phát hành vẫn sửa được số liệu, cho tới khi thu tiền lần đầu.',
-                    'Hoá đơn bắt đầu tính vào công nợ của khách.',
-                  ],
-                  confirmLabel: 'Phát hành',
-                })
-                if (agreed) act(() => api.issueInvoice(id), 'Đã phát hành.')
-              }}
-            >
+            <button className="btn-primary" disabled={busy} onClick={issue}>
               Phát hành
             </button>
           )}
@@ -229,39 +294,8 @@ export default function InvoiceDetail() {
               In
             </button>
           )}
-          {!isVoid && !editing && invoice.status !== '4' && (
-            <button
-              className="btn-danger"
-              disabled={busy}
-              onClick={async () => {
-                const agreed = await confirm({
-                  title: isDraft ? 'Xoá hoá đơn nháp?' : 'Huỷ hoá đơn đã phát hành?',
-                  message: isDraft
-                    ? `Hoá đơn nháp ${invoice.code} sẽ bị xoá.`
-                    : `Hoá đơn ${invoice.code} · ${moneyd(invoice.total)} sẽ chuyển sang trạng thái đã huỷ.`,
-                  details: isDraft
-                    ? ['Chỉ số điện nước quay lại hàng chờ, chốt sổ lại được.']
-                    : [
-                        'Chỉ số điện nước quay lại hàng chờ để chốt sổ lại.',
-                        'Bản ghi hoá đơn vẫn giữ để còn dấu vết, không xoá hẳn.',
-                        'Chốt sổ lại sẽ sinh hoá đơn mã mới.',
-                      ],
-                  confirmLabel: isDraft ? 'Xoá nháp' : 'Huỷ hoá đơn',
-                  tone: 'danger',
-                })
-                if (!agreed) return
-
-                const reason = isDraft ? null : window.prompt('Lý do huỷ (ghi vào lịch sử hoá đơn):') || 'không ghi lý do'
-
-                act(
-                  async () => {
-                    await api.deleteInvoice(id, reason)
-                    if (isDraft) navigate('/invoices')
-                  },
-                  isDraft ? 'Đã xoá hoá đơn nháp.' : 'Đã huỷ hoá đơn, chỉ số trả về hàng chờ.',
-                )
-              }}
-            >
+          {!isVoid && !editing && invoice.status !== InvoiceStatus.Paid && (
+            <button className="btn-danger" disabled={busy} onClick={removeInvoice}>
               {isDraft ? 'Xoá nháp' : 'Huỷ hoá đơn'}
             </button>
           )}
@@ -306,22 +340,28 @@ export default function InvoiceDetail() {
                   return (
                     <tr key={d.id}>
                       <td className="px-4 py-2 text-slate-700">{d.description}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-slate-500">{num(d.quantity)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-slate-500">{money(d.unit_price)}</td>
+                      <td className="px-4 py-2 text-right tabular-nums text-slate-500">
+                        {num(d.quantity)}
+                      </td>
+                      <td className="px-4 py-2 text-right tabular-nums text-slate-500">
+                        {money(d.unit_price)}
+                      </td>
                       <td className="px-4 py-2 text-right font-medium tabular-nums">{money(d.amount)}</td>
                     </tr>
                   )
                 }
 
                 const lineAmount = Math.round((Number(draft.quantity) || 0) * (Number(draft.unit_price) || 0))
-                const changed = lineAmount !== d.amount
+                const lineChanged = lineAmount !== d.amount
 
                 return (
-                  <tr key={d.id} className={changed ? 'bg-sky-50/60' : ''}>
+                  <tr key={d.id} className={lineChanged ? 'bg-sky-50/60' : ''}>
                     <td className="px-4 py-2 text-slate-700">
                       {d.description}
                       {d.meter_reading_id && (
-                        <div className="text-[11px] text-slate-400">gắn với chỉ số đồng hồ #{d.meter_reading_id}</div>
+                        <div className="text-[11px] text-slate-400">
+                          gắn với chỉ số đồng hồ #{d.meter_reading_id}
+                        </div>
                       )}
                     </td>
                     <td className="px-2 py-2">
@@ -348,7 +388,9 @@ export default function InvoiceDetail() {
                     </td>
                     <td className="px-4 py-2 text-right font-medium tabular-nums">
                       {money(lineAmount)}
-                      {changed && <div className="text-[11px] text-slate-400 line-through">{money(d.amount)}</div>}
+                      {lineChanged && (
+                        <div className="text-[11px] text-slate-400 line-through">{money(d.amount)}</div>
+                      )}
                     </td>
                   </tr>
                 )
@@ -368,22 +410,26 @@ export default function InvoiceDetail() {
                       value={draftDiscount}
                       onChange={(e) => setDraftDiscount(e.target.value)}
                     />
-                    {editErrors.discount && <p className="mt-1 text-[11px] text-rose-600">{editErrors.discount}</p>}
+                    {editErrors.discount && (
+                      <p className="mt-1 text-[11px] text-rose-600">{editErrors.discount}</p>
+                    )}
                   </td>
                 </tr>
               ) : (
-                invoice.discount > 0 && <Row label="Giảm giá" value={-invoice.discount} tone="text-emerald-700" />
+                invoice.discount > 0 && (
+                  <Row label="Giảm giá" value={-invoice.discount} tone="text-emerald-700" />
+                )
               )}
-              {invoice.carried_over > 0 && <Row label="Nợ kỳ trước" value={invoice.carried_over} tone="text-amber-700" />}
+              {invoice.carried_over > 0 && (
+                <Row label="Nợ kỳ trước" value={invoice.carried_over} tone="text-amber-700" />
+              )}
               <tr className="border-t border-slate-200">
                 <td colSpan={3} className="px-4 py-2 text-right font-bold text-slate-700">
                   TỔNG
                 </td>
                 <td className="px-4 py-2 text-right text-base font-bold tabular-nums">
                   {moneyd(
-                    editing
-                      ? draftSubtotal - (Number(draftDiscount) || 0) + invoice.carried_over
-                      : invoice.total,
+                    editing ? draftSubtotal - (Number(draftDiscount) || 0) + invoice.carried_over : invoice.total,
                   )}
                 </td>
               </tr>
@@ -412,28 +458,19 @@ export default function InvoiceDetail() {
             ) : (
               <ul className="space-y-2 text-sm">
                 {payments.map((p) => (
-                  <li key={p.id} className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2 last:border-0">
+                  <li
+                    key={p.id}
+                    className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2 last:border-0"
+                  >
                     <div>
                       <div className="font-medium tabular-nums text-slate-800">{moneyd(p.amount)}</div>
                       <div className="text-xs text-slate-500">
-                        {date(p.paid_at)} · {METHOD_LABEL[p.method]} · {KIND_LABEL[p.kind]}
+                        {date(p.paid_at)} · {PAYMENT_METHOD_LABEL[p.method]} · {PAYMENT_KIND_LABEL[p.kind]}
                       </div>
                     </div>
                     <button
                       className="text-xs text-rose-600 hover:underline"
-                      onClick={async () => {
-                        const agreed = await confirm({
-                          title: 'Xoá giao dịch thu tiền?',
-                          message: `Giao dịch ${moneyd(p.amount)} ngày ${date(p.paid_at)} sẽ bị xoá.`,
-                          details: [
-                            'Công nợ của hoá đơn tăng trở lại tương ứng.',
-                            'Dùng khi ghi nhầm số tiền, không dùng để hoàn tiền cho khách.',
-                          ],
-                          confirmLabel: 'Xoá giao dịch',
-                          tone: 'danger',
-                        })
-                        if (agreed) act(() => api.deletePayment(p.id), 'Đã xoá giao dịch.')
-                      }}
+                      onClick={() => removePayment(p)}
                     >
                       xoá
                     </button>
@@ -463,7 +500,7 @@ export default function InvoiceDetail() {
         invoice={payOpen ? invoice : null}
         onClose={() => setPayOpen(false)}
         onSubmit={async (payload) => {
-          await act(() => api.pay(id, payload), 'Đã ghi nhận thu tiền.')
+          await act(() => api.pay(id!, payload), 'Đã ghi nhận thu tiền.')
           setPayOpen(false)
         }}
       />
@@ -471,7 +508,7 @@ export default function InvoiceDetail() {
   )
 }
 
-function Row({ label, value, tone = '' }) {
+function Row({ label, value, tone = '' }: { label: string; value: number; tone?: string }) {
   return (
     <tr>
       <td colSpan={3} className={`px-4 py-1.5 text-right ${tone || 'text-slate-500'}`}>
@@ -481,4 +518,3 @@ function Row({ label, value, tone = '' }) {
     </tr>
   )
 }
-

@@ -1,24 +1,36 @@
-import { api } from '../lib/api'
-import { useApi } from '../lib/useApi'
-import { money, moneyShort } from '../lib/format'
-import { ErrorBox, Spinner } from '../components/ui'
+import { api } from '@/lib/api'
+import { useApi } from '@/lib/useApi'
+import { money, moneyShort } from '@/lib/format'
+import { ErrorBox, Spinner } from '@/components/ui'
+import type { MonthlyReportRow } from '@/types'
+
+interface Totals {
+  income: number
+  collected: number
+  expense: number
+  profit: number
+}
+
+const ZERO: Totals = { income: 0, collected: 0, expense: 0, profit: 0 }
 
 export default function Report() {
   const { data, error, loading, reload } = useApi(() => api.monthlyReport(12), [])
 
   if (loading) return <Spinner />
   if (error) return <ErrorBox error={error} onRetry={reload} />
+  if (!data) return null
 
   const rows = data.rows
   const peak = Math.max(1, ...rows.map((r) => Math.max(r.income, r.expense)))
-  const totals = rows.reduce(
+
+  const totals = rows.reduce<Totals>(
     (acc, r) => ({
       income: acc.income + r.income,
       collected: acc.collected + r.collected,
       expense: acc.expense + r.expense,
       profit: acc.profit + r.profit,
     }),
-    { income: 0, collected: 0, expense: 0, profit: 0 },
+    ZERO,
   )
 
   return (
@@ -28,21 +40,7 @@ export default function Report() {
       <div className="card p-5">
         <div className="flex items-end gap-2 overflow-x-auto pb-2" style={{ height: 200 }}>
           {rows.map((r) => (
-            <div key={r.period_ym} className="flex min-w-12 flex-1 flex-col items-center justify-end gap-1">
-              <div className="flex w-full items-end justify-center gap-0.5" style={{ height: 150 }}>
-                <div
-                  className="w-1/2 rounded-t bg-sky-500"
-                  style={{ height: `${(r.income / peak) * 100}%` }}
-                  title={`Doanh thu ${money(r.income)}`}
-                />
-                <div
-                  className="w-1/2 rounded-t bg-rose-400"
-                  style={{ height: `${(r.expense / peak) * 100}%` }}
-                  title={`Chi phí ${money(r.expense)}`}
-                />
-              </div>
-              <span className="text-[10px] tabular-nums text-slate-500">{r.label}</span>
-            </div>
+            <Bar key={r.period_ym} row={r} peak={peak} />
           ))}
         </div>
         <div className="mt-2 flex gap-4 text-xs text-slate-500">
@@ -73,7 +71,9 @@ export default function Report() {
                 <td className="px-3 py-2 text-right tabular-nums">{money(r.income)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-slate-500">{money(r.collected)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-rose-600">{money(r.expense)}</td>
-                <td className="px-3 py-2 text-right font-semibold tabular-nums text-emerald-700">{money(r.profit)}</td>
+                <td className="px-3 py-2 text-right font-semibold tabular-nums text-emerald-700">
+                  {money(r.profit)}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -91,8 +91,29 @@ export default function Report() {
 
       <p className="text-xs text-slate-400">
         Doanh thu = tổng chi tiết hoá đơn trừ giảm giá, không cộng nợ kỳ trước (tránh tính hai lần).
-        &nbsp;·&nbsp; Chênh giữa doanh thu và đã thu là công nợ: {moneyShort(totals.income - totals.collected)}.
+        &nbsp;·&nbsp; Chênh giữa doanh thu và đã thu là công nợ:{' '}
+        {moneyShort(totals.income - totals.collected)}.
       </p>
+    </div>
+  )
+}
+
+function Bar({ row, peak }: { row: MonthlyReportRow; peak: number }) {
+  return (
+    <div className="flex min-w-12 flex-1 flex-col items-center justify-end gap-1">
+      <div className="flex w-full items-end justify-center gap-0.5" style={{ height: 150 }}>
+        <div
+          className="w-1/2 rounded-t bg-sky-500"
+          style={{ height: `${(row.income / peak) * 100}%` }}
+          title={`Doanh thu ${money(row.income)}`}
+        />
+        <div
+          className="w-1/2 rounded-t bg-rose-400"
+          style={{ height: `${(row.expense / peak) * 100}%` }}
+          title={`Chi phí ${money(row.expense)}`}
+        />
+      </div>
+      <span className="text-[10px] tabular-nums text-slate-500">{row.label}</span>
     </div>
   )
 }

@@ -1,10 +1,23 @@
 import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { api } from '../lib/api'
-import { useApi } from '../lib/useApi'
-import { date, money, moneyd, num, period } from '../lib/format'
-import { ErrorBox, Spinner, useToast } from '../components/ui'
-import { useConfirm } from '../components/confirm'
+import { api } from '@/lib/api'
+import { useApi } from '@/lib/useApi'
+import {
+  currentPeriod,
+  date,
+  money,
+  moneyd,
+  monthInputToPeriod,
+  num,
+  period,
+  periodToMonthInput,
+} from '@/lib/format'
+import { ErrorBox, Spinner, useToast } from '@/components/ui'
+import { useConfirm } from '@/components/confirm'
+import type { InvoiceDraft, PeriodYm } from '@/types'
+
+/** Nút nào đang chạy: 'all' cả kỳ · 'exp' khối chi phí · số = contract_id. */
+type BusyKey = 'all' | 'exp' | number | null
 
 /**
  * Chốt sổ — nút không tạo hoá đơn ngay mà mở trang xem trước.
@@ -17,40 +30,48 @@ export default function Billing() {
   const toast = useToast()
   const confirm = useConfirm()
 
-  const [currentPeriod, setCurrentPeriod] = useState(
-    () => params.get('period') || new Date().toISOString().slice(0, 7).replace('-', ''),
-  )
-  // null = không chạy gì; 'all' = chốt cả kỳ; số = contract_id; 'exp' = khối chi phí
-  const [busyKey, setBusyKey] = useState(null)
+  const [viewPeriod, setViewPeriod] = useState<PeriodYm>(() => params.get('period') ?? currentPeriod())
+  const [busyKey, setBusyKey] = useState<BusyKey>(null)
 
-  const { data, error, loading, reload } = useApi(() => api.billingPreview(currentPeriod), [currentPeriod])
+  const { data, error, loading, reload } = useApi(() => api.billingPreview(viewPeriod), [viewPeriod])
+
+  if (loading) return <Spinner />
+  if (error) return <ErrorBox error={error} onRetry={reload} />
+  if (!data) return null
+
+  const { invoices, owner_expenses: expenses, warnings } = data
+  const nothingToDo = invoices.length === 0 && expenses.length === 0
 
   /** Chốt cả kỳ — xong thì sang danh sách hoá đơn. */
   async function commitAll() {
-    const warnings = data.warnings.map((w) => w.message)
+    if (!data) return
+
+    const warningMessages = data.warnings.map((w) => w.message)
 
     const agreed = await confirm({
-      title: `Chốt sổ cả kỳ ${period(currentPeriod)}?`,
+      title: `Chốt sổ cả kỳ ${period(viewPeriod)}?`,
       message:
         `Sẽ tạo ${data.invoices.length} hoá đơn nháp` +
         (data.owner_expenses.length ? ` và ${data.owner_expenses.length} dòng chi phí` : '') +
         `, tổng ${moneyd(data.total)}.` +
-        (warnings.length ? '\n\nLưu ý trước khi chốt:' : ''),
-      details: warnings.length ? warnings : ['Chỉ số điện nước sẽ được đánh dấu đã tính tiền.'],
+        (warningMessages.length ? '\n\nLưu ý trước khi chốt:' : ''),
+      details: warningMessages.length
+        ? warningMessages
+        : ['Chỉ số điện nước sẽ được đánh dấu đã tính tiền.'],
       confirmLabel: 'Chốt cả kỳ',
     })
     if (!agreed) return
 
     setBusyKey('all')
     try {
-      const result = await api.billingCommit(currentPeriod)
+      const result = await api.billingCommit(viewPeriod)
       toast.success(
         `Đã tạo ${result.invoice_count} hoá đơn nháp` +
           (result.expense_count ? ` và ${result.expense_count} dòng chi phí.` : '.'),
       )
-      navigate(`/invoices?period=${currentPeriod}`)
+      navigate(`/invoices?period=${viewPeriod}`)
     } catch (err) {
-      toast.error(err.message)
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
       setBusyKey(null)
     }
@@ -60,7 +81,7 @@ export default function Billing() {
    * Chốt lẻ — ở lại trang để làm tiếp phòng khác.
    * Phòng vừa chốt sẽ biến mất khỏi danh sách xem trước, đó là phản hồi.
    */
-  async function commitOne(draft) {
+  async function commitOne(draft: InvoiceDraft) {
     const agreed = await confirm({
       title: `Tạo hoá đơn phòng ${draft.room_code}?`,
       message: `${draft.tenant_name} · ${moneyd(draft.total)} · ${date(draft.period_from)} → ${date(draft.period_to)}`,
@@ -75,17 +96,19 @@ export default function Billing() {
 
     setBusyKey(draft.contract_id)
     try {
-      await api.billingCommit(currentPeriod, [draft.contract_id])
+      await api.billingCommit(viewPeriod, [draft.contract_id])
       toast.success(`Đã tạo hoá đơn nháp phòng ${draft.room_code}.`)
       reload()
     } catch (err) {
-      toast.error(err.message)
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
       setBusyKey(null)
     }
   }
 
   async function commitExpenses() {
+    if (!data) return
+
     const total = data.owner_expenses.reduce((sum, e) => sum + e.amount, 0)
 
     const agreed = await confirm({
@@ -99,27 +122,21 @@ export default function Billing() {
     setBusyKey('exp')
     try {
       const roomIds = data.owner_expenses.map((e) => e.room_id)
-      const result = await api.billingCommit(currentPeriod, [], roomIds)
+      const result = await api.billingCommit(viewPeriod, [], roomIds)
       toast.success(`Đã ghi ${result.expense_count} dòng chi phí.`)
       reload()
     } catch (err) {
-      toast.error(err.message)
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
       setBusyKey(null)
     }
   }
 
-  if (loading) return <Spinner />
-  if (error) return <ErrorBox error={error} onRetry={reload} />
-
-  const { invoices, owner_expenses: expenses, warnings } = data
-  const nothingToDo = invoices.length === 0 && expenses.length === 0
-
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-slate-900">Chốt sổ kỳ {period(currentPeriod)}</h1>
+          <h1 className="text-xl font-bold text-slate-900">Chốt sổ kỳ {period(viewPeriod)}</h1>
           <p className="text-sm text-slate-500">
             {date(data.period_from)} → {date(data.period_to)}
           </p>
@@ -127,8 +144,8 @@ export default function Billing() {
         <input
           type="month"
           className="field w-44"
-          value={`${currentPeriod.slice(0, 4)}-${currentPeriod.slice(4, 6)}`}
-          onChange={(e) => setCurrentPeriod(e.target.value.replace('-', ''))}
+          value={periodToMonthInput(viewPeriod)}
+          onChange={(e) => setViewPeriod(monthInputToPeriod(e.target.value))}
         />
       </div>
 
@@ -174,8 +191,12 @@ export default function Billing() {
                   {draft.details.map((line, i) => (
                     <tr key={i}>
                       <td className="px-4 py-2 text-slate-700">{line.description}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-slate-500">{num(line.quantity)}</td>
-                      <td className="px-4 py-2 text-right tabular-nums text-slate-500">× {money(line.unit_price)}</td>
+                      <td className="px-4 py-2 text-right tabular-nums text-slate-500">
+                        {num(line.quantity)}
+                      </td>
+                      <td className="px-4 py-2 text-right tabular-nums text-slate-500">
+                        × {money(line.unit_price)}
+                      </td>
                       <td className="px-4 py-2 text-right font-medium tabular-nums text-slate-800">
                         {money(line.amount)}
                       </td>
@@ -216,7 +237,9 @@ export default function Billing() {
                   disabled={busyKey !== null}
                   onClick={() => commitOne(draft)}
                 >
-                  {busyKey === draft.contract_id ? 'Đang tạo…' : `Tạo hoá đơn nháp phòng ${draft.room_code}`}
+                  {busyKey === draft.contract_id
+                    ? 'Đang tạo…'
+                    : `Tạo hoá đơn nháp phòng ${draft.room_code}`}
                 </button>
               </div>
             </div>
@@ -244,7 +267,11 @@ export default function Billing() {
               </table>
 
               <div className="flex justify-end border-t border-slate-100 bg-slate-50/60 px-4 py-2">
-                <button className="btn-ghost px-3 py-1.5 text-xs" disabled={busyKey !== null} onClick={commitExpenses}>
+                <button
+                  className="btn-ghost px-3 py-1.5 text-xs"
+                  disabled={busyKey !== null}
+                  onClick={commitExpenses}
+                >
                   {busyKey === 'exp' ? 'Đang ghi…' : 'Ghi vào chi phí'}
                 </button>
               </div>
@@ -256,7 +283,11 @@ export default function Billing() {
               Còn <b>{invoices.length}</b> hoá đơn chưa chốt ·{' '}
               <span className="text-lg font-bold tabular-nums text-slate-900">{moneyd(data.total)}</span>
             </div>
-            <button className="btn-primary" onClick={commitAll} disabled={busyKey !== null || invoices.length === 0}>
+            <button
+              className="btn-primary"
+              onClick={commitAll}
+              disabled={busyKey !== null || invoices.length === 0}
+            >
               {busyKey === 'all' ? 'Đang tạo…' : `TẠO TẤT CẢ ${invoices.length} HOÁ ĐƠN`}
             </button>
           </div>

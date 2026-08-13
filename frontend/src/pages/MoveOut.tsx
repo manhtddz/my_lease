@@ -1,34 +1,49 @@
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api } from '../lib/api'
-import { useApi } from '../lib/useApi'
-import { date, money, moneyd, num, todayISO } from '../lib/format'
-import { ErrorBox, Field, Spinner, useToast } from '../components/ui'
-import { useConfirm } from '../components/confirm'
-import { check, compact, dateAfter, max, notLessThan, notNegative, required } from '../lib/validate'
-import { msg } from '../lib/messages'
+import { api } from '@/lib/api'
+import { useApi } from '@/lib/useApi'
+import { date, money, moneyd, num, todayISO } from '@/lib/format'
+import { ErrorBox, Field, Spinner, useToast } from '@/components/ui'
+import { useConfirm } from '@/components/confirm'
+import { msg } from '@/lib/messages'
+import {
+  check,
+  compact,
+  dateAfter,
+  hasErrors,
+  max,
+  notLessThan,
+  notNegative,
+  required,
+} from '@/lib/validate'
+import { METER_UNIT, MeterType, type MeterSnapshot } from '@/types'
+
+/** Chỉ số đang nhập cho một đồng hồ. */
+interface ReadingInput extends MeterSnapshot {
+  reading: string
+}
 
 /**
  * Wizard trả phòng — sinh meter_readings reason='3' và hoá đơn is_settlement.
  * Toàn bộ nằm trong một transaction ở backend.
  */
 export default function MoveOut() {
-  const { id } = useParams()
+  const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const toast = useToast()
   const confirm = useConfirm()
 
-  const [endDate, setEndDate] = useState(todayISO())
-  const [readings, setReadings] = useState(null)
+  const [endDate, setEndDate] = useState<string>(todayISO())
+  const [readings, setReadings] = useState<ReadingInput[] | null>(null)
   const [deduction, setDeduction] = useState('0')
   const [reason, setReason] = useState('')
   const [refund, setRefund] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [errors, setErrors] = useState({})
+  const [errors, setErrors] = useState<Record<string, string>>({})
 
   const { data, error, loading, reload } = useApi(
     () =>
-      api.moveOutPreview(id, endDate).then((res) => {
+      api.moveOutPreview(id!, endDate).then((res) => {
         setReadings(res.meters.map((m) => ({ ...m, reading: String(m.prev_reading) })))
         return res
       }),
@@ -37,44 +52,51 @@ export default function MoveOut() {
 
   if (loading || !readings) return <Spinner />
   if (error) return <ErrorBox error={error} onRetry={reload} />
+  if (!data) return null
 
   // Ước tính hiển thị — số chính thức do backend dựng lại lúc submit.
-  const rentPerDay = Math.round(data.rent_amount / new Date(endDate.slice(0, 4), endDate.slice(5, 7), 0).getDate())
+  const daysInMonth = new Date(Number(endDate.slice(0, 4)), Number(endDate.slice(5, 7)), 0).getDate()
+  const rentPerDay = Math.round(data.rent_amount / daysInMonth)
   const rentEstimate = rentPerDay * data.days
-  const depositLeft = Math.max(0, data.deposit_held - Number(deduction || 0))
+  const depositLeft = Math.max(0, data.deposit_held - (Number(deduction) || 0))
 
-  function validate() {
-    const readingErrors = {}
+  function validate(): boolean {
+    if (!readings || !data) return false
+
+    const raw: Record<string, string | null> = {}
+
     readings.forEach((m) => {
-      const field = m.type === '1' ? 'reading_electric' : 'reading_water'
-      readingErrors[`reading-${m.meter_id}`] = check(field, m.reading, [
+      const field = m.type === MeterType.Electric ? 'reading_electric' : 'reading_water'
+      raw[`reading-${m.meter_id}`] = check(field, m.reading, [
         required,
         notNegative,
         notLessThan(m.prev_reading, num(m.prev_reading)),
       ])
     })
 
-    const clean = compact({
-      end_date: check('end_date', endDate, [
-        required,
-        dateAfter(data.period_from, 'ngày bắt đầu kỳ tính tiền'),
-      ], 'Ngày trả phòng'),
-      deduction: check('deduction', deduction, [
-        required,
-        notNegative,
-        max(data.deposit_held, `${moneyd(data.deposit_held)} (cọc đang giữ)`),
-      ]),
-      // Lý do chỉ bắt buộc khi thực sự trừ tiền — khớp với Rule::requiredIf ở backend.
-      deduction_reason: Number(deduction) > 0 ? check('deduction_reason', reason, [required]) : null,
-      ...readingErrors,
-    })
+    raw.end_date = check(
+      'end_date',
+      endDate,
+      [required, dateAfter(data.period_from, 'ngày bắt đầu kỳ tính tiền')],
+      'Ngày trả phòng',
+    )
 
-    setErrors(clean)
-    return Object.keys(clean).length === 0
+    raw.deduction = check('deduction', deduction, [
+      required,
+      notNegative,
+      max(data.deposit_held, `${moneyd(data.deposit_held)} (cọc đang giữ)`),
+    ])
+
+    // Lý do chỉ bắt buộc khi thực sự trừ tiền — khớp với Rule::requiredIf ở backend.
+    raw.deduction_reason = Number(deduction) > 0 ? check('deduction_reason', reason, [required]) : null
+
+    const clean = compact(raw)
+    setErrors(clean as Record<string, string>)
+    return !hasErrors(clean)
   }
 
   async function submit() {
-    if (!validate()) {
+    if (!validate() || !readings || !data) {
       toast.error(msg('formInvalid'))
       return
     }
@@ -96,17 +118,17 @@ export default function MoveOut() {
 
     setSaving(true)
     try {
-      const result = await api.moveOut(id, {
+      const result = await api.moveOut(id!, {
         end_date: endDate,
         meter_readings: readings.map((m) => ({ meter_id: m.meter_id, reading: Number(m.reading) })),
-        deposit_deduction: Number(deduction || 0),
+        deposit_deduction: Number(deduction) || 0,
         deduction_reason: reason || null,
         refund_deposit: refund,
       })
       toast.success(`Đã tất toán. Hoá đơn ${result.code}.`)
       navigate(`/invoices/${result.invoice_id}`)
     } catch (err) {
-      toast.error(err.message)
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
       setSaving(false)
     }
@@ -138,7 +160,9 @@ export default function MoveOut() {
             const consumption = Math.max(0, Number(m.reading) - m.prev_reading)
             return (
               <div key={m.meter_id} className="flex flex-wrap items-center gap-3">
-                <span className="w-14 font-medium text-slate-700">{m.type === '1' ? 'Điện' : 'Nước'}</span>
+                <span className="w-14 font-medium text-slate-700">
+                  {m.type === MeterType.Electric ? 'Điện' : 'Nước'}
+                </span>
                 <span className="text-sm tabular-nums text-slate-500">
                   {num(m.prev_reading)} ({date(m.prev_read_date)})
                 </span>
@@ -159,7 +183,7 @@ export default function MoveOut() {
                   )}
                 </div>
                 <span className="text-sm tabular-nums text-slate-600">
-                  = {num(consumption)} {m.type === '1' ? 'kWh' : 'm³'}
+                  = {num(consumption)} {METER_UNIT[m.type]}
                 </span>
               </div>
             )
@@ -171,11 +195,13 @@ export default function MoveOut() {
         <dl className="space-y-1 text-sm">
           <Line label={`Tiền phòng ${data.days} ngày × ${money(rentPerDay)}`} value={rentEstimate} />
           <Line label="Điện, nước, rác…" value={null} hint="tính chính xác khi bấm tất toán" />
-          {data.carried_over > 0 && <Line label="Nợ kỳ trước" value={data.carried_over} tone="text-amber-700" />}
+          {data.carried_over > 0 && (
+            <Line label="Nợ kỳ trước" value={data.carried_over} tone="text-amber-700" />
+          )}
         </dl>
         <p className="mt-2 text-xs text-slate-500">
-          Tiền rác tính nguyên tháng dù ở lẻ ngày (khoản cố định). Muốn giảm thì sửa hoá đơn khi còn nháp — hoặc chỉnh
-          giảm giá sau khi tạo.
+          Tiền rác tính nguyên tháng dù ở lẻ ngày (khoản cố định). Muốn giảm thì sửa hoá đơn khi còn
+          nháp — hoặc chỉnh giảm giá sau khi tạo.
         </p>
       </Section>
 
@@ -216,7 +242,7 @@ export default function MoveOut() {
   )
 }
 
-function Section({ title, children }) {
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="card p-4">
       <h2 className="mb-3 text-sm font-bold text-slate-700">{title}</h2>
@@ -225,11 +251,23 @@ function Section({ title, children }) {
   )
 }
 
-function Line({ label, value, hint, tone = '' }) {
+function Line({
+  label,
+  value,
+  hint,
+  tone = '',
+}: {
+  label: string
+  value: number | null
+  hint?: string
+  tone?: string
+}) {
   return (
     <div className="flex justify-between gap-4">
       <dt className={`text-slate-600 ${tone}`}>{label}</dt>
-      <dd className={`tabular-nums ${tone}`}>{value === null ? <span className="text-xs text-slate-400">{hint}</span> : money(value)}</dd>
+      <dd className={`tabular-nums ${tone}`}>
+        {value === null ? <span className="text-xs text-slate-400">{hint}</span> : money(value)}
+      </dd>
     </div>
   )
 }

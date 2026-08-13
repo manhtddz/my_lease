@@ -1,20 +1,12 @@
 import { useState } from 'react'
-import { api } from '../lib/api'
-import { useApi } from '../lib/useApi'
-import { date, money, moneyd, todayISO } from '../lib/format'
-import { Empty, ErrorBox, Field, Modal, Spinner, useToast } from '../components/ui'
-import { useConfirm } from '../components/confirm'
-import { check, compact, dateNotFuture, positive, required } from '../lib/validate'
-import { msg } from '../lib/messages'
-
-const CATEGORY = {
-  1: 'Hoá đơn tiện ích',
-  2: 'Sửa chữa',
-  3: 'Thuế',
-  4: 'Thiết bị',
-  5: 'Internet',
-  6: 'Khác',
-}
+import { api } from '@/lib/api'
+import { useApi } from '@/lib/useApi'
+import { date, money, moneyd, todayISO } from '@/lib/format'
+import { Empty, ErrorBox, Field, Modal, Spinner, useToast } from '@/components/ui'
+import { useConfirm } from '@/components/confirm'
+import { msg } from '@/lib/messages'
+import { check, compact, dateNotFuture, hasErrors, positive, required, type Errors } from '@/lib/validate'
+import { EXPENSE_CATEGORY_LABEL, ExpenseCategory, type Room } from '@/types'
 
 export default function Expenses() {
   const toast = useToast()
@@ -25,6 +17,7 @@ export default function Expenses() {
 
   if (loading) return <Spinner />
   if (error) return <ErrorBox error={error} onRetry={reload} />
+  if (!data) return null
 
   const total = data.rows.reduce((s, e) => s + e.amount, 0)
 
@@ -63,7 +56,7 @@ export default function Expenses() {
               {data.rows.map((e) => (
                 <tr key={e.id} className="hover:bg-slate-50">
                   <td className="px-3 py-2 tabular-nums text-slate-600">{date(e.spent_at)}</td>
-                  <td className="px-3 py-2">{CATEGORY[e.category]}</td>
+                  <td className="px-3 py-2">{EXPENSE_CATEGORY_LABEL[e.category]}</td>
                   <td className="px-3 py-2 text-slate-600">{e.note || e.vendor || '—'}</td>
                   <td className="px-3 py-2 text-slate-500">{e.room_code || e.building_name || 'chung'}</td>
                   <td className="px-3 py-2 text-right font-medium tabular-nums">{money(e.amount)}</td>
@@ -73,7 +66,7 @@ export default function Expenses() {
                       onClick={async () => {
                         const agreed = await confirm({
                           title: 'Xoá chi phí này?',
-                          message: `${CATEGORY[e.category]} · ${moneyd(e.amount)} · ngày ${date(e.spent_at)}`,
+                          message: `${EXPENSE_CATEGORY_LABEL[e.category]} · ${moneyd(e.amount)} · ngày ${date(e.spent_at)}`,
                           details: ['Báo cáo lời lỗ của kỳ tương ứng sẽ thay đổi theo.'],
                           confirmLabel: 'Xoá chi phí',
                           tone: 'danger',
@@ -85,7 +78,7 @@ export default function Expenses() {
                           toast.success('Đã xoá chi phí.')
                           reload()
                         } catch (err) {
-                          toast.error(err.message)
+                          toast.error(err instanceof Error ? err.message : String(err))
                         }
                       }}
                     >
@@ -122,11 +115,32 @@ export default function Expenses() {
   )
 }
 
-function ExpenseModal({ open, onClose, onSaved, rooms }) {
+interface ExpenseForm {
+  category: ExpenseCategory
+  amount: string
+  spent_at: string
+  room_id: string
+  vendor: string
+  note: string
+}
+
+type ExpenseField = 'amount' | 'spent_at'
+
+function ExpenseModal({
+  open,
+  onClose,
+  onSaved,
+  rooms,
+}: {
+  open: boolean
+  onClose: () => void
+  onSaved: () => void
+  rooms: Room[]
+}) {
   const toast = useToast()
-  const [errors, setErrors] = useState({})
-  const [form, setForm] = useState({
-    category: '1',
+  const [errors, setErrors] = useState<Errors<ExpenseField>>({})
+  const [form, setForm] = useState<ExpenseForm>({
+    category: ExpenseCategory.Utility,
     amount: '',
     spent_at: todayISO(),
     room_id: '',
@@ -134,16 +148,15 @@ function ExpenseModal({ open, onClose, onSaved, rooms }) {
     note: '',
   })
 
-  function validate() {
-    const clean = compact({
+  function validate(): boolean {
+    const clean = compact<ExpenseField>({
       amount: check('amount', form.amount, [required, positive]),
       spent_at: check('spent_at', form.spent_at, [required, dateNotFuture]),
     })
     setErrors(clean)
 
-    if (Object.keys(clean).length > 0) {
+    if (hasErrors(clean)) {
       toast.error(msg('formInvalid'))
-
       return false
     }
 
@@ -164,7 +177,7 @@ function ExpenseModal({ open, onClose, onSaved, rooms }) {
       })
       onSaved()
     } catch (err) {
-      toast.error(err.message)
+      toast.error(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -173,8 +186,12 @@ function ExpenseModal({ open, onClose, onSaved, rooms }) {
       <div className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
           <Field label="Loại">
-            <select className="field" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
-              {Object.entries(CATEGORY).map(([k, v]) => (
+            <select
+              className="field"
+              value={form.category}
+              onChange={(e) => setForm({ ...form, category: e.target.value as ExpenseCategory })}
+            >
+              {Object.entries(EXPENSE_CATEGORY_LABEL).map(([k, v]) => (
                 <option key={k} value={k}>
                   {v}
                 </option>
@@ -182,7 +199,12 @@ function ExpenseModal({ open, onClose, onSaved, rooms }) {
             </select>
           </Field>
           <Field label="Ngày chi" error={errors.spent_at}>
-            <input type="date" className="field" value={form.spent_at} onChange={(e) => setForm({ ...form, spent_at: e.target.value })} />
+            <input
+              type="date"
+              className="field"
+              value={form.spent_at}
+              onChange={(e) => setForm({ ...form, spent_at: e.target.value })}
+            />
           </Field>
         </div>
         <Field label="Số tiền" error={errors.amount} hint="Đơn vị đồng, không cần dấu phân cách">
@@ -195,7 +217,11 @@ function ExpenseModal({ open, onClose, onSaved, rooms }) {
         </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Phòng (bỏ trống = chung)">
-            <select className="field" value={form.room_id} onChange={(e) => setForm({ ...form, room_id: e.target.value })}>
+            <select
+              className="field"
+              value={form.room_id}
+              onChange={(e) => setForm({ ...form, room_id: e.target.value })}
+            >
               <option value="">— chung cả dãy —</option>
               {rooms.map((r) => (
                 <option key={r.id} value={r.id}>
@@ -205,11 +231,20 @@ function ExpenseModal({ open, onClose, onSaved, rooms }) {
             </select>
           </Field>
           <Field label="Nhà cung cấp">
-            <input className="field" placeholder="EVN, thợ sửa…" value={form.vendor} onChange={(e) => setForm({ ...form, vendor: e.target.value })} />
+            <input
+              className="field"
+              placeholder="EVN, thợ sửa…"
+              value={form.vendor}
+              onChange={(e) => setForm({ ...form, vendor: e.target.value })}
+            />
           </Field>
         </div>
         <Field label="Ghi chú">
-          <input className="field" value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
+          <input
+            className="field"
+            value={form.note}
+            onChange={(e) => setForm({ ...form, note: e.target.value })}
+          />
         </Field>
         <div className="flex justify-end gap-2 pt-2">
           <button className="btn-ghost" onClick={onClose}>
