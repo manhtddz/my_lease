@@ -1,0 +1,496 @@
+import { useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { api } from '../lib/api'
+import { useApi } from '../lib/useApi'
+import { date, money, moneyd, num } from '../lib/format'
+import { ErrorBox, Field as FormField, Spinner, useToast } from '../components/ui'
+import { useConfirm } from '../components/confirm'
+import { check, compact, idCard, notNegative, phone, positive, required } from '../lib/validate'
+
+const STEPS = ['Người thuê', 'Người ở ghép', 'Điều khoản', 'Chốt số đồng hồ']
+
+/**
+ * Wizard nhận khách mới — sinh meter_readings reason='2'.
+ * Bước 4 bắt buộc: thiếu nó thì hoá đơn đầu tiên sẽ tính cả điện của khách trước.
+ */
+export default function MoveIn() {
+  const { roomId } = useParams()
+  const navigate = useNavigate()
+  const toast = useToast()
+  const confirm = useConfirm()
+
+  const [step, setStep] = useState(0)
+  const [saving, setSaving] = useState(false)
+  const [form, setForm] = useState(null)
+  const [errors, setErrors] = useState({})
+
+  const { data, error, loading, reload } = useApi(
+    () =>
+      api.moveInDefaults(roomId).then((res) => {
+        setForm({
+          tenant: { full_name: '', phone: '', id_card_no: '', dob: '', gender: '1', hometown: '' },
+          occupants: [],
+          start_date: res.today,
+          end_date: '',
+          rent_amount: res.room.default_rent,
+          deposit_amount: res.room.default_rent,
+          occupant_count: 1,
+          note: '',
+          services: res.services
+            .filter((s) => s.suggested)
+            .map((s) => ({ ...s, enabled: true })),
+          disabledServices: res.services.filter((s) => !s.suggested).map((s) => ({ ...s, enabled: false })),
+          meter_readings: res.meters.map((m) => ({ ...m, reading: String(m.prev_reading) })),
+        })
+        return res
+      }),
+    [roomId],
+  )
+
+  if (loading || !form) return <Spinner />
+  if (error) return <ErrorBox error={error} onRetry={reload} />
+
+  const allServices = [...form.services, ...form.disabledServices].sort((a, b) => a.service_item_id - b.service_item_id)
+
+  function patch(next) {
+    setForm((f) => ({ ...f, ...next }))
+  }
+
+  function toggleService(id) {
+    const inActive = form.services.find((s) => s.service_item_id === id)
+    if (inActive) {
+      patch({
+        services: form.services.filter((s) => s.service_item_id !== id),
+        disabledServices: [...form.disabledServices, inActive],
+      })
+    } else {
+      const item = form.disabledServices.find((s) => s.service_item_id === id)
+      patch({
+        services: [...form.services, item],
+        disabledServices: form.disabledServices.filter((s) => s.service_item_id !== id),
+      })
+    }
+  }
+
+  function setServicePrice(id, key, value) {
+    patch({
+      services: form.services.map((s) => (s.service_item_id === id ? { ...s, [key]: value } : s)),
+    })
+  }
+
+  /** Validate riêng từng bước — chặn ngay tại bước sai, không dồn tới cuối. */
+  function validateStep(index) {
+    let clean = {}
+
+    if (index === 0) {
+      clean = compact({
+        full_name: check('Họ tên', form.tenant.full_name, [required]),
+        phone: phone(form.tenant.phone),
+        id_card_no: idCard(form.tenant.id_card_no),
+      })
+    }
+
+    if (index === 1) {
+      const occupantErrors = {}
+      form.occupants.forEach((o, i) => {
+        if (!o.full_name.trim()) occupantErrors[`occupant-${i}`] = 'Nhập họ tên hoặc xoá dòng này'
+        const cardError = idCard(o.id_card_no)
+        if (cardError) occupantErrors[`occupant-card-${i}`] = cardError
+      })
+      clean = compact(occupantErrors)
+    }
+
+    if (index === 2) {
+      const serviceErrors = {}
+      form.services.forEach((s) => {
+        const priceError = check('Đơn giá', s.unit_price, [required, notNegative])
+        if (priceError) serviceErrors[`service-${s.service_item_id}`] = priceError
+      })
+
+      clean = compact({
+        rent_amount: check('Tiền phòng', form.rent_amount, [required, positive]),
+        deposit_amount: check('Tiền cọc', form.deposit_amount, [required, notNegative]),
+        start_date: check('Ngày vào', form.start_date, [required]),
+        occupant_count: check('Số người ở', form.occupant_count, [required, positive]),
+        end_date:
+          form.end_date && form.end_date < form.start_date ? 'Ngày hết hạn phải sau ngày vào' : null,
+        ...serviceErrors,
+      })
+    }
+
+    if (index === 3) {
+      const readingErrors = {}
+      form.meter_readings.forEach((m) => {
+        const label = m.type === '1' ? 'Chỉ số điện' : 'Chỉ số nước'
+        const error = check(label, m.reading, [required, notNegative])
+        if (error) {
+          readingErrors[`reading-${m.meter_id}`] = error
+        } else if (Number(m.reading) < m.prev_reading) {
+          readingErrors[`reading-${m.meter_id}`] =
+            `${label} nhỏ hơn số cũ (${num(m.prev_reading)}) — kiểm tra lại`
+        }
+      })
+      clean = compact(readingErrors)
+    }
+
+    setErrors(clean)
+    return Object.keys(clean).length === 0
+  }
+
+  function goNext() {
+    if (!validateStep(step)) {
+      toast.error('Kiểm tra lại các ô bôi đỏ.')
+      return
+    }
+    setStep((s) => s + 1)
+  }
+
+  async function submit() {
+    // Chạy lại validate tất cả các bước — người dùng có thể quay lại sửa rồi nhảy tới.
+    for (let i = 0; i <= 3; i++) {
+      if (!validateStep(i)) {
+        setStep(i)
+        toast.error(`Bước ${i + 1} còn thiếu thông tin.`)
+        return
+      }
+    }
+
+    const agreed = await confirm({
+      title: 'Tạo hợp đồng mới?',
+      message: `${form.tenant.full_name} sẽ thuê phòng ${data.room.code} từ ngày ${date(form.start_date)}.`,
+      details: [
+        `Tiền phòng ${moneyd(form.rent_amount)} / tháng`,
+        `Tiền cọc ${moneyd(form.deposit_amount)} — sẽ ghi nhận là đã thu`,
+        `${form.services.length} khoản phí dịch vụ`,
+        `Chốt số đồng hồ: ${form.meter_readings.map((m) => `${m.type === '1' ? 'điện' : 'nước'} ${num(m.reading)}`).join(', ')}`,
+        'Phòng chuyển sang trạng thái đang thuê.',
+      ],
+      confirmLabel: 'Tạo hợp đồng',
+    })
+    if (!agreed) return
+
+    setSaving(true)
+    try {
+      const result = await api.moveIn({
+        room_id: Number(roomId),
+        tenant: {
+          ...form.tenant,
+          dob: form.tenant.dob || null,
+        },
+        start_date: form.start_date,
+        end_date: form.end_date || null,
+        rent_amount: Number(form.rent_amount),
+        deposit_amount: Number(form.deposit_amount),
+        occupant_count: Number(form.occupant_count),
+        note: form.note || null,
+        occupants: form.occupants.filter((o) => o.full_name.trim()),
+        services: form.services.map((s) => ({
+          service_item_id: s.service_item_id,
+          unit_price: Number(s.unit_price),
+          quantity_fixed: s.quantity_fixed ? Number(s.quantity_fixed) : null,
+        })),
+        meter_readings: form.meter_readings.map((m) => ({
+          meter_id: m.meter_id,
+          reading: Number(m.reading),
+        })),
+      })
+      toast.success(`Đã tạo hợp đồng ${result.code}.`)
+      navigate('/')
+    } catch (err) {
+      toast.error(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="mx-auto max-w-3xl space-y-4">
+      <div>
+        <Link to="/" className="text-sm text-sky-700 hover:underline">
+          ← Tổng quan
+        </Link>
+        <h1 className="mt-1 text-xl font-bold text-slate-900">
+          Nhận khách mới — phòng {data.room.code}
+        </h1>
+        <p className="text-sm text-slate-500">{data.room.building_name}</p>
+      </div>
+
+      <ol className="flex flex-wrap gap-2 text-xs">
+        {STEPS.map((label, i) => (
+          <li
+            key={label}
+            className={`rounded-full px-3 py-1 font-medium ${
+              i === step ? 'bg-sky-600 text-white' : i < step ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-500'
+            }`}
+          >
+            {i + 1}. {label}
+          </li>
+        ))}
+      </ol>
+
+      <div className="card p-5">
+        {step === 0 && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Họ tên *" span error={errors.full_name}>
+              <input
+                className="field"
+                value={form.tenant.full_name}
+                onChange={(e) => patch({ tenant: { ...form.tenant, full_name: e.target.value } })}
+              />
+            </Field>
+            <Field label="Số điện thoại" error={errors.phone}>
+              <input className="field" value={form.tenant.phone} onChange={(e) => patch({ tenant: { ...form.tenant, phone: e.target.value } })} />
+            </Field>
+            <Field label="CCCD / CMND" error={errors.id_card_no} hint="12 số (CCCD) hoặc 9 số (CMND)">
+              <input className="field" value={form.tenant.id_card_no} onChange={(e) => patch({ tenant: { ...form.tenant, id_card_no: e.target.value } })} />
+            </Field>
+            <Field label="Ngày sinh">
+              <input type="date" className="field" value={form.tenant.dob} onChange={(e) => patch({ tenant: { ...form.tenant, dob: e.target.value } })} />
+            </Field>
+            <Field label="Giới tính">
+              <select className="field" value={form.tenant.gender} onChange={(e) => patch({ tenant: { ...form.tenant, gender: e.target.value } })}>
+                <option value="1">Nam</option>
+                <option value="2">Nữ</option>
+                <option value="3">Khác</option>
+              </select>
+            </Field>
+            <Field label="Thường trú (khai tạm trú)" span>
+              <input className="field" value={form.tenant.hometown} onChange={(e) => patch({ tenant: { ...form.tenant, hometown: e.target.value } })} />
+            </Field>
+          </div>
+        )}
+
+        {step === 1 && (
+          <div className="space-y-3">
+            <p className="text-sm text-slate-500">
+              Người ở cùng — phục vụ khai tạm trú. Không dùng để tách tiền: một hợp đồng chỉ một người trả.
+            </p>
+            {form.occupants.map((occupant, i) => (
+              <div key={i} className="grid gap-2 sm:grid-cols-4">
+                <div className="sm:col-span-2">
+                  <input
+                    className={`field ${errors[`occupant-${i}`] ? 'border-rose-400' : ''}`}
+                    placeholder="Họ tên"
+                    value={occupant.full_name}
+                    onChange={(e) => {
+                      const next = [...form.occupants]
+                      next[i] = { ...occupant, full_name: e.target.value }
+                      patch({ occupants: next })
+                    }}
+                  />
+                  {errors[`occupant-${i}`] && (
+                    <p className="mt-1 text-[11px] text-rose-600">{errors[`occupant-${i}`]}</p>
+                  )}
+                </div>
+                <div>
+                  <input
+                    className={`field ${errors[`occupant-card-${i}`] ? 'border-rose-400' : ''}`}
+                    placeholder="CCCD"
+                    value={occupant.id_card_no || ''}
+                    onChange={(e) => {
+                      const next = [...form.occupants]
+                      next[i] = { ...occupant, id_card_no: e.target.value }
+                      patch({ occupants: next })
+                    }}
+                  />
+                  {errors[`occupant-card-${i}`] && (
+                    <p className="mt-1 text-[11px] text-rose-600">{errors[`occupant-card-${i}`]}</p>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    className="field"
+                    placeholder="Quan hệ"
+                    value={occupant.relationship || ''}
+                    onChange={(e) => {
+                      const next = [...form.occupants]
+                      next[i] = { ...occupant, relationship: e.target.value }
+                      patch({ occupants: next })
+                    }}
+                  />
+                  <button
+                    className="btn-danger px-2"
+                    onClick={() => patch({ occupants: form.occupants.filter((_, j) => j !== i) })}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            ))}
+            <button
+              className="btn-ghost"
+              onClick={() =>
+                patch({
+                  occupants: [...form.occupants, { full_name: '', id_card_no: '', relationship: '' }],
+                  occupant_count: form.occupants.length + 2,
+                })
+              }
+            >
+              + Thêm người ở ghép
+            </button>
+          </div>
+        )}
+
+        {step === 2 && (
+          <div className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Tiền phòng / tháng" error={errors.rent_amount}>
+                <input
+                  className="field text-right tabular-nums"
+                  inputMode="numeric"
+                  value={form.rent_amount}
+                  onChange={(e) => patch({ rent_amount: e.target.value })}
+                />
+              </Field>
+              <Field label="Tiền cọc" error={errors.deposit_amount}>
+                <input
+                  className="field text-right tabular-nums"
+                  inputMode="numeric"
+                  value={form.deposit_amount}
+                  onChange={(e) => patch({ deposit_amount: e.target.value })}
+                />
+              </Field>
+              <Field label="Ngày vào" error={errors.start_date}>
+                <input type="date" className="field" value={form.start_date} onChange={(e) => patch({ start_date: e.target.value })} />
+              </Field>
+              <Field label="Ngày hết hạn (bỏ trống = không hạn)" error={errors.end_date}>
+                <input type="date" className="field" value={form.end_date} onChange={(e) => patch({ end_date: e.target.value })} />
+              </Field>
+              <Field label="Tổng số người ở" error={errors.occupant_count}>
+                <input
+                  type="number"
+                  min="1"
+                  className="field"
+                  value={form.occupant_count}
+                  onChange={(e) => patch({ occupant_count: e.target.value })}
+                />
+              </Field>
+            </div>
+
+            <div>
+              <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">Phí dịch vụ</h3>
+              <p className="mb-2 text-xs text-slate-400">
+                Tiền phòng không nằm ở đây — nó lưu trực tiếp trên hợp đồng để tránh hai nguồn cùng giữ một con số.
+              </p>
+              <div className="space-y-2">
+                {allServices.map((s) => {
+                  const active = form.services.find((x) => x.service_item_id === s.service_item_id)
+                  return (
+                    <div key={s.service_item_id} className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 p-2">
+                      <label className="flex min-w-32 flex-1 items-center gap-2 text-sm">
+                        <input type="checkbox" checked={!!active} onChange={() => toggleService(s.service_item_id)} />
+                        {s.name}
+                      </label>
+                      {active && (
+                        <>
+                          <div>
+                            <input
+                              className={`num-input w-28 ${errors[`service-${s.service_item_id}`] ? 'border-rose-400' : ''}`}
+                              inputMode="numeric"
+                              value={active.unit_price}
+                              onChange={(e) => setServicePrice(s.service_item_id, 'unit_price', e.target.value)}
+                            />
+                            {errors[`service-${s.service_item_id}`] && (
+                              <p className="mt-1 text-[11px] text-rose-600">{errors[`service-${s.service_item_id}`]}</p>
+                            )}
+                          </div>
+                          <span className="w-14 text-xs text-slate-500">/ {s.unit_label || 'lần'}</span>
+                          {s.pricing_mode === '1' && s.code === 'parking' && (
+                            <input
+                              className="num-input w-16"
+                              placeholder="SL"
+                              value={active.quantity_fixed || ''}
+                              onChange={(e) => setServicePrice(s.service_item_id, 'quantity_fixed', e.target.value)}
+                            />
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="space-y-3">
+            <p className="text-sm text-slate-600">
+              Chốt số đồng hồ tại ngày vào <b>{date(form.start_date)}</b>. Bắt buộc — đây là điểm khởi đầu chuỗi đọc
+              của khách này.
+            </p>
+            {form.meter_readings.map((m, i) => {
+              const consumption = Number(m.reading) - m.prev_reading
+              return (
+                <div key={m.meter_id} className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 p-3">
+                  <span className="w-16 font-medium text-slate-700">{m.type === '1' ? 'Điện' : 'Nước'}</span>
+                  <span className="text-sm text-slate-500">
+                    số cũ <b className="tabular-nums">{num(m.prev_reading)}</b> ({date(m.prev_read_date)})
+                  </span>
+                  <span className="text-slate-400">→</span>
+                  <div>
+                    <input
+                      className={`num-input w-32 ${errors[`reading-${m.meter_id}`] ? 'border-rose-400' : ''}`}
+                      inputMode="decimal"
+                      value={m.reading}
+                      onChange={(e) => {
+                        const next = [...form.meter_readings]
+                        next[i] = { ...m, reading: e.target.value }
+                        patch({ meter_readings: next })
+                      }}
+                    />
+                    {errors[`reading-${m.meter_id}`] && (
+                      <p className="mt-1 text-[11px] text-rose-600">{errors[`reading-${m.meter_id}`]}</p>
+                    )}
+                  </div>
+                  <span className="text-sm tabular-nums text-slate-600">
+                    = {num(Math.max(0, consumption))} {m.type === '1' ? 'kWh' : 'm³'}
+                  </span>
+                </div>
+              )
+            })}
+
+            <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900">
+              ℹ Phần tiêu thụ trước mốc này thuộc khoảng phòng trống → ghi vào <b>chi phí của bạn</b>, không tính cho
+              khách mới.
+            </div>
+
+            <div className="card border-slate-200 bg-slate-50 p-4 text-sm">
+              <div className="mb-1 font-semibold text-slate-700">Tóm tắt</div>
+              <div>Khách: {form.tenant.full_name || '—'}</div>
+              <div>Tiền phòng: {moneyd(form.rent_amount)} / tháng</div>
+              <div>Cọc: {moneyd(form.deposit_amount)}</div>
+              <div>
+                Phí dịch vụ: {form.services.map((s) => `${s.name} ${money(s.unit_price)}`).join(' · ') || 'không có'}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="flex justify-between">
+        <button className="btn-ghost" disabled={step === 0} onClick={() => setStep((s) => s - 1)}>
+          ← Quay lại
+        </button>
+        {step < STEPS.length - 1 ? (
+          <button className="btn-primary" onClick={goNext}>
+            Tiếp →
+          </button>
+        ) : (
+          <button className="btn-primary" disabled={saving} onClick={submit}>
+            {saving ? 'Đang lưu…' : 'HOÀN TẤT'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** Bọc Field dùng chung, thêm tiện ích span 2 cột cho lưới form. */
+function Field({ label, children, span, error, hint }) {
+  return (
+    <FormField label={label} error={error} hint={hint} className={span ? 'sm:col-span-2' : ''}>
+      {children}
+    </FormField>
+  )
+}
