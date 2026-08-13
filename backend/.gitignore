@@ -18,6 +18,17 @@
 /public/fonts-manifest.dev.json
 /public/hot
 /public/storage
+
+# Bản build của frontend — do `cd frontend && npm run build` sinh ra
+/public/index.html
+/public/assets
+/public/favicon.svg
+/public/icons.svg
+
+# Dữ liệu thật của nhà trọ, không đưa vào git
+/database/*.sqlite
+/database/*.sqlite-journal
+
 /storage/*.key
 /storage/pail
 /vendor
