@@ -12,6 +12,7 @@ use App\Models\Payment;
 use App\Models\Room;
 use App\Models\ServiceItem;
 use App\Models\Setting;
+use App\Support\AuditLog;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -159,6 +160,14 @@ class BillingService
                     ->where('read_date', '<=', $preview['period_to'])
                     ->update(['is_billed' => true]);
             }
+
+            AuditLog::info(AuditLog::BILLING, sprintf(
+                'Chốt sổ kỳ %s%s: tạo %d hoá đơn, %d dòng chi phí',
+                $periodYm,
+                $partial ? ' (chốt lẻ)' : ' (cả kỳ)',
+                count($created),
+                $expenses
+            ), ['invoice_ids' => $created]);
 
             return [
                 'invoice_ids' => $created,
@@ -496,12 +505,26 @@ class BillingService
 
             $subtotal = (int) InvoiceDetail::where('invoice_id', $invoice->id)->sum('amount');
             $finalDiscount = $discount ?? $invoice->discount;
+            $oldTotal = $invoice->total;
 
             $invoice->update([
                 'subtotal' => $subtotal,
                 'discount' => $finalDiscount,
                 'total' => $subtotal - $finalDiscount + $invoice->carried_over,
                 'note' => $note ?? $invoice->note,
+            ]);
+
+            // Sửa hoá đơn là hành động dễ gây tranh cãi với khách nhất — ghi vết đầy đủ
+            // cả số cũ, số mới và chỉ số nào bị ghi ngược vào sổ đồng hồ.
+            AuditLog::warning(AuditLog::BILLING, sprintf(
+                'Sửa hoá đơn %s: tổng %s → %s',
+                $invoice->code,
+                number_format($oldTotal, 0, ',', '.'),
+                number_format($invoice->total, 0, ',', '.')
+            ), [
+                'invoice_id' => $invoice->id,
+                'synced_readings' => $synced,
+                'unsynced_lines' => $unsynced,
             ]);
 
             return ['invoice' => $invoice->refresh(), 'synced' => $synced, 'unsynced' => $unsynced];
@@ -565,6 +588,13 @@ class BillingService
             'issue_date' => Carbon::today()->toDateString(),
         ]);
 
+        AuditLog::info(AuditLog::BILLING, sprintf(
+            'Phát hành hoá đơn %s · phòng %s · %s',
+            $invoice->code,
+            $invoice->room?->code,
+            number_format($invoice->total, 0, ',', '.')
+        ), ['invoice_id' => $invoice->id]);
+
         return $invoice->refresh();
     }
 
@@ -584,6 +614,16 @@ class BillingService
             $invoice->update([
                 'status' => Code::INVOICE_VOID,
                 'note' => trim(($invoice->note ?? '')."\nHuỷ: ".($reason ?? 'không ghi lý do')),
+            ]);
+
+            AuditLog::warning(AuditLog::BILLING, sprintf(
+                'Huỷ hoá đơn %s · %s · lý do: %s',
+                $invoice->code,
+                number_format($invoice->total, 0, ',', '.'),
+                $reason ?? 'không ghi'
+            ), [
+                'invoice_id' => $invoice->id,
+                'released_readings' => $readingIds->all(),
             ]);
 
             return $invoice->refresh();
@@ -612,6 +652,18 @@ class BillingService
             ]);
 
             $this->syncPaidAmount($invoice);
+
+            AuditLog::info(AuditLog::BILLING, sprintf(
+                'Thu tiền %s cho %s · còn lại %s',
+                number_format($amount, 0, ',', '.'),
+                $invoice->code,
+                number_format($invoice->refresh()->remaining(), 0, ',', '.')
+            ), [
+                'invoice_id' => $invoice->id,
+                'payment_id' => $payment->id,
+                'method' => $method,
+                'ref_no' => $refNo,
+            ]);
 
             return $payment;
         });

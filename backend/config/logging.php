@@ -54,8 +54,21 @@ return [
 
         'stack' => [
             'driver' => 'stack',
-            'channels' => explode(',', (string) env('LOG_STACK', 'single')),
+            'channels' => explode(',', (string) env('LOG_STACK', 'daily_folder')),
             'ignore_exceptions' => false,
+        ],
+
+        /*
+         * Log theo NGÀY: storage/logs/{Y-m-d}/{vùng}.{mức}.log
+         * Truyền context['path'] để tách theo nghiệp vụ, vd ['path' => 'billing']
+         * sẽ ghi vào storage/logs/{Y-m-d}/billing.log.
+         *
+         * Theo convention lease-mart — xem App\Logging\DailyFolderHandler.
+         */
+        'daily_folder' => [
+            'driver' => 'custom',
+            'via' => App\Logging\DailyFolderLogger::class,
+            'level' => env('LOG_LEVEL', 'debug'),
         ],
 
         'single' => [

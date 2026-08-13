@@ -7,6 +7,7 @@ use App\Models\Contract;
 use App\Models\Meter;
 use App\Models\MeterReading;
 use App\Models\Room;
+use App\Support\AuditLog;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -118,6 +119,15 @@ class MeterReadingService
                 }
             }
         });
+
+        AuditLog::info(AuditLog::READINGS, sprintf(
+            'Ghi số kỳ %s ngày %s: lưu %d, bỏ trống %d, lỗi %d',
+            $periodYm,
+            $readDate,
+            $saved,
+            $skipped,
+            count($errors)
+        ), $errors ? ['errors' => $errors] : []);
 
         return ['saved' => $saved, 'skipped' => $skipped, 'errors' => $errors];
     }

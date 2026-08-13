@@ -13,7 +13,10 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        // Ghi vết mọi request ghi dữ liệu vào storage/logs/{Y-m-d}/api.log
+        $middleware->api(append: [
+            App\Http\Middleware\LogApiRequest::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(

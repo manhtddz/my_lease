@@ -14,6 +14,7 @@ use App\Models\Room;
 use App\Models\ServiceItem;
 use App\Models\Setting;
 use App\Models\Tenant;
+use App\Support\AuditLog;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -122,6 +123,21 @@ class TenancyService
             }
 
             $room->update(['status' => Code::ROOM_OCCUPIED]);
+
+            AuditLog::info(AuditLog::TENANCY, sprintf(
+                'Nhận khách %s vào phòng %s từ %s · thuê %s · cọc %s',
+                $tenant->full_name,
+                $room->code,
+                $startDate,
+                number_format($contract->rent_amount, 0, ',', '.'),
+                number_format($contract->deposit_amount, 0, ',', '.')
+            ), [
+                'contract_id' => $contract->id,
+                'contract_code' => $contract->code,
+                'tenant_id' => $tenant->id,
+                'occupant_count' => $contract->occupant_count,
+                'services' => $contract->services->count(),
+            ]);
 
             return $contract->load(['tenant', 'room', 'services.serviceItem', 'occupants']);
         });
@@ -298,6 +314,22 @@ class TenancyService
 
             // 5. Trả phòng về trạng thái trống — sẵn sàng cho khách mới ngay trong tháng.
             $contract->room->update(['status' => Code::ROOM_VACANT]);
+
+            AuditLog::warning(AuditLog::TENANCY, sprintf(
+                'Trả phòng %s · %s · ngày %s · hoá đơn tất toán %s (%s)',
+                $contract->room->code,
+                $contract->tenant?->full_name,
+                $endDate,
+                $invoice->code,
+                number_format($invoice->total, 0, ',', '.')
+            ), [
+                'contract_id' => $contract->id,
+                'invoice_id' => $invoice->id,
+                'deposit_held' => $held,
+                'deposit_deducted' => $deduct,
+                'deduction_reason' => $data['deduction_reason'] ?? null,
+                'deposit_refunded' => ($data['refund_deposit'] ?? true) ? $refund : 0,
+            ]);
 
             return $invoice->load('details');
         });
