@@ -10,31 +10,47 @@
 
 ## Chạy dự án
 
-Cần **PHP 8.2+**, **Composer**, **Node 20+**.
+Hai cách, chọn theo mục đích.
 
-### 1. Backend
+### A · Dùng thật — một domain, không cổng nào
 
-```bash
+Laravel serve luôn bản build của React. Cần **Laravel Herd** (đã bundle PHP, Composer, Node, npm).
+
+```powershell
 cd backend
 composer install
-cp .env.example .env          # nếu chưa có
+copy .env.example .env
 php artisan key:generate
-php artisan migrate:fresh --seed
-php artisan serve --port=8000
+php -r "file_exists('database/database.sqlite') || touch('database/database.sqlite');"
+php artisan migrate --seed
+
+cd ..\frontend
+npm install
+npm run build          # xuất vào backend/public/
+
+cd ..\backend
+herd link nha-tro      # cấp domain nha-tro.test
 ```
 
-Seeder tạo sẵn: 2 toà · 6 phòng · 12 đồng hồ · 7 khoản thu · 4 hợp đồng đang thuê,
-kèm **lịch sử 3 tháng** đã ghi số, chốt sổ, thu tiền (một phòng trả thiếu để có công nợ demo).
+Mở **http://nha-tro.test** — giao diện, API, deep link đều dưới domain này.
+Hướng dẫn đầy đủ: [`docs/04-setup-herd.md`](docs/04-setup-herd.md).
 
-### 2. Frontend
+### B · Vừa sửa code — có hot reload
+
+Cần **PHP 8.2+**, **Composer**, **Node 20+**. Hai terminal:
 
 ```bash
-cd frontend
-npm install
-npm run dev
+# Terminal 1
+cd backend && php artisan serve --port=8000
+
+# Terminal 2
+cd frontend && npm run dev
 ```
 
 Mở **http://localhost:5180**. Vite proxy `/api` sang `127.0.0.1:8000` nên không vướng CORS.
+
+Seeder tạo sẵn: 2 toà · 6 phòng · 12 đồng hồ · 7 khoản thu · 4 hợp đồng đang thuê,
+kèm **lịch sử 3 tháng** đã ghi số, chốt sổ, thu tiền (một phòng trả thiếu để có công nợ demo).
 
 ### Đổi sang MySQL
 
@@ -60,20 +76,27 @@ nha-tro/
 ├── docs/
 │   ├── 01-erd.md            ERD + quy tắc nghiệp vụ + bảng mã CHAR(1)
 │   ├── 02-schema.sql        DDL tham chiếu cho MySQL (bản gốc thiết kế)
-│   └── 03-admin-flow.md     Flow admin: 4 sự kiện sinh chỉ số, 5 màn hình
+│   ├── 03-admin-flow.md     Flow admin: 4 sự kiện sinh chỉ số, 5 màn hình
+│   └── 04-setup-herd.md     Setup máy mới bằng Herd, một domain không cổng
 ├── backend/
-│   ├── app/Enums/Code.php           bảng mã CHAR(1) + nhãn tiếng Việt
-│   ├── app/Models/Concerns/         SoftDeleteByFlag (del_flag)
+│   ├── app/Enums/Code.php               bảng mã CHAR(1) + nhãn tiếng Việt
+│   ├── app/Models/Concerns/             SoftDeleteByFlag (del_flag)
 │   ├── app/Services/
-│   │   ├── MeterReadingService.php  chuỗi chỉ số, quy trách nhiệm đoạn tiêu thụ
-│   │   ├── BillingService.php       chốt sổ, phát hành, thu tiền
-│   │   └── TenancyService.php       wizard nhận khách / trả phòng
+│   │   ├── MeterReadingService.php      chuỗi chỉ số, quy trách nhiệm đoạn tiêu thụ
+│   │   ├── BillingService.php           chốt sổ, phát hành, thu tiền
+│   │   └── TenancyService.php           wizard nhận khách / trả phòng
+│   ├── app/Logging/                     log theo ngày (DailyFolderHandler)
+│   ├── app/Support/AuditLog.php         ghi vết hành động chạm tới tiền
+│   ├── app/Http/Middleware/             LogApiRequest
+│   ├── app/Console/Commands/            logs:prune
+│   ├── lang/vi/validation.php           thông điệp validate tiếng Việt
 │   └── routes/api.php
 └── frontend/src/
     ├── pages/                    Dashboard, Readings, Billing, Invoices, MoveIn, MoveOut…
     ├── lib/
     │   ├── api.js                api client, bóc message lỗi tiếng Việt
     │   ├── format.js             format tiền/ngày kiểu VN
+    │   ├── messages.js           từ điển nhãn field + khuôn thông điệp
     │   └── validate.js           luật validate phía client
     └── components/
         ├── ui.jsx                Badge, Modal, Toast, Spinner, Field
@@ -163,6 +186,55 @@ Ba guard ở backend đáng chú ý:
   `required_with` kích hoạt cả khi truyền `0`.
 
 Chi tiết đầy đủ: [`docs/03-admin-flow.md`](docs/03-admin-flow.md) mục 10.
+
+### Hệ thống log theo ngày
+
+Theo convention lease-mart: `storage/logs/{Y-m-d}/`, mỗi vùng một file.
+
+```
+storage/logs/2026-08-13/
+├── error.log      MỌI lỗi, bất kể vùng nào — mở đây trước khi đi tìm
+├── api.log        request ghi dữ liệu: method, path, status, thời gian, payload
+├── billing.log    chốt sổ · phát hành · huỷ · sửa hoá đơn · thu tiền
+├── readings.log   ghi số điện nước
+└── tenancy.log    nhận khách · trả phòng
+```
+
+Mỗi entry hai dòng: thông điệp, rồi khối `#Request:` ghi `METHOD | URI | ACTION | IP | AGENT`
+(lỗi thêm `REFERER`). Không có khối này thì log lỗi gần như vô dụng khi truy nguyên nhân.
+
+**Lỗi ghi vào cả hai chỗ** — file vùng và `error.log` — là cố ý: đọc `billing.log` thấy trọn
+mạch nghiệp vụ không khuyết chỗ thất bại, còn mở `error.log` là biết ngay hôm nay hỏng những gì.
+Dòng trong `error.log` có tiền tố `[vùng]`.
+
+Dọn log cũ:
+
+```bash
+php artisan logs:prune --days=90 --dry-run   # xem trước
+php artisan logs:prune --days=90
+```
+
+Vì sao cần ghi vết: DB không có FK và hoá đơn sửa được khi chưa thu tiền, nên khi số liệu lệch
+thì file log là nơi duy nhất trả lời được *"ai đổi cái gì, lúc nào"*. Xem
+[`App\Support\AuditLog`](backend/app/Support/AuditLog.php).
+
+### Thông điệp động
+
+Một khuôn thông điệp, nhãn field thay vào — không viết tay từng câu:
+
+| Tầng | Nơi khai | Cách dùng |
+|---|---|---|
+| Backend | [`lang/vi/validation.php`](backend/lang/vi/validation.php) | `:attribute` của Laravel, kèm bảng `attributes` dịch tên field |
+| Frontend | [`lib/messages.js`](frontend/src/lib/messages.js) | `FIELD` (nhãn) + `MESSAGE` (khuôn có `{field}`), gọi qua `msg()` |
+
+```js
+check('deduction', value, [required, notNegative, max(held, '2.000.000đ')])
+// → "Tiền trừ cọc không được vượt quá 2.000.000đ"
+```
+
+Hai bảng nhãn phải khớp nhau, nếu không người dùng thấy hai tên cho cùng một field.
+`APP_LOCALE=vi` nên thông điệp validate của Laravel cũng ra tiếng Việt — trước đó chúng lọt
+nguyên văn tiếng Anh lên UI.
 
 ---
 
