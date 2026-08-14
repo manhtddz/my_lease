@@ -2,17 +2,10 @@ import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { useApi } from '@/lib/useApi'
-import {
-  currentPeriod,
-  date,
-  money,
-  moneyd,
-  monthInputToPeriod,
-  num,
-  period,
-  periodToMonthInput,
-} from '@/lib/format'
-import { ErrorBox, Spinner, useToast } from '@/components/ui'
+import { useMutation } from '@/lib/useMutation'
+import { clampPeriod, currentPeriod, date, money, moneyd, num, period } from '@/lib/format'
+import { ErrorBox, Spinner } from '@/components/ui'
+import { PeriodNav } from '@/components/PeriodNav'
 import { useConfirm } from '@/components/confirm'
 import type { InvoiceDraft, PeriodYm } from '@/types'
 
@@ -27,13 +20,45 @@ type BusyKey = 'all' | 'exp' | number | null
 export default function Billing() {
   const [params] = useSearchParams()
   const navigate = useNavigate()
-  const toast = useToast()
   const confirm = useConfirm()
 
-  const [viewPeriod, setViewPeriod] = useState<PeriodYm>(() => params.get('period') ?? currentPeriod())
-  const [busyKey, setBusyKey] = useState<BusyKey>(null)
+  const [viewPeriod, setViewPeriod] = useState<PeriodYm>(() => {
+    const fromUrl = params.get('period')
+    return fromUrl ? clampPeriod(fromUrl) : currentPeriod()
+  })
+  // Chốt lẻ chạy chung một hook nên cần nhớ riêng phòng nào đang chạy để hiện "Đang tạo…" đúng dòng.
+  const [pendingContractId, setPendingContractId] = useState<number | null>(null)
 
   const { data, error, loading, reload } = useApi(() => api.billingPreview(viewPeriod), [viewPeriod])
+
+  const commitAllMut = useMutation((p: PeriodYm) => api.billingCommit(p), {
+    success: (r) =>
+      `Đã tạo ${r.invoice_count} hoá đơn nháp` +
+      (r.expense_count ? ` và ${r.expense_count} dòng chi phí.` : '.'),
+    onSuccess: () => navigate(`/invoices?period=${viewPeriod}`),
+  })
+
+  const commitOneMut = useMutation(
+    async (draft: InvoiceDraft) => {
+      await api.billingCommit(viewPeriod, [draft.contract_id])
+      return draft.room_code
+    },
+    { success: (code) => `Đã tạo hoá đơn nháp phòng ${code}.`, onSuccess: () => reload() },
+  )
+
+  const commitExpensesMut = useMutation(
+    (roomIds: Parameters<typeof api.billingCommit>[2]) =>
+      api.billingCommit(viewPeriod, [], roomIds),
+    { success: (r) => `Đã ghi ${r.expense_count} dòng chi phí.`, onSuccess: () => reload() },
+  )
+
+  const busyKey: BusyKey = commitAllMut.busy
+    ? 'all'
+    : commitExpensesMut.busy
+      ? 'exp'
+      : commitOneMut.busy
+        ? pendingContractId
+        : null
 
   if (loading) return <Spinner />
   if (error) return <ErrorBox error={error} onRetry={reload} />
@@ -62,19 +87,7 @@ export default function Billing() {
     })
     if (!agreed) return
 
-    setBusyKey('all')
-    try {
-      const result = await api.billingCommit(viewPeriod)
-      toast.success(
-        `Đã tạo ${result.invoice_count} hoá đơn nháp` +
-          (result.expense_count ? ` và ${result.expense_count} dòng chi phí.` : '.'),
-      )
-      navigate(`/invoices?period=${viewPeriod}`)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusyKey(null)
-    }
+    await commitAllMut.run(viewPeriod)
   }
 
   /**
@@ -94,16 +107,9 @@ export default function Billing() {
     })
     if (!agreed) return
 
-    setBusyKey(draft.contract_id)
-    try {
-      await api.billingCommit(viewPeriod, [draft.contract_id])
-      toast.success(`Đã tạo hoá đơn nháp phòng ${draft.room_code}.`)
-      reload()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusyKey(null)
-    }
+    setPendingContractId(draft.contract_id)
+    await commitOneMut.run(draft)
+    setPendingContractId(null)
   }
 
   async function commitExpenses() {
@@ -119,17 +125,7 @@ export default function Billing() {
     })
     if (!agreed) return
 
-    setBusyKey('exp')
-    try {
-      const roomIds = data.owner_expenses.map((e) => e.room_id)
-      const result = await api.billingCommit(viewPeriod, [], roomIds)
-      toast.success(`Đã ghi ${result.expense_count} dòng chi phí.`)
-      reload()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusyKey(null)
-    }
+    await commitExpensesMut.run(data.owner_expenses.map((e) => e.room_id))
   }
 
   return (
@@ -141,12 +137,7 @@ export default function Billing() {
             {date(data.period_from)} → {date(data.period_to)}
           </p>
         </div>
-        <input
-          type="month"
-          className="field w-44"
-          value={periodToMonthInput(viewPeriod)}
-          onChange={(e) => setViewPeriod(monthInputToPeriod(e.target.value))}
-        />
+        <PeriodNav value={viewPeriod} onChange={(p) => p && setViewPeriod(p)} />
       </div>
 
       {warnings.length > 0 && (

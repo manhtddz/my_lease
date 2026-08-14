@@ -177,31 +177,86 @@ class BillingService
         });
     }
 
-    /** Hợp đồng cần ra hoá đơn cho kỳ — bao gồm HĐ đã kết thúc giữa kỳ. */
+    /** Hợp đồng còn ngày chưa ra hoá đơn trong kỳ — gồm cả HĐ đã kết thúc giữa kỳ. */
     private function billableContracts(string $periodYm, string $periodFrom, string $periodTo)
     {
         return Contract::with(['tenant', 'room.building', 'services.serviceItem'])
             ->whereIn('status', [Code::CONTRACT_ACTIVE, Code::CONTRACT_ENDED])
             ->where('start_date', '<=', $periodTo)
-            // Hoá đơn đã huỷ không tính là "đã chốt sổ" — huỷ xong phải chốt lại được.
-            ->whereDoesntHave('invoices', fn ($q) => $q
-                ->where('period_ym', $periodYm)
-                ->where('status', '!=', Code::INVOICE_VOID))
             ->get()
-            ->filter(function (Contract $c) use ($periodFrom) {
-                $end = $c->effectiveEndDate();
+            ->filter(fn (Contract $c) => $this->segment($c, $periodFrom, $periodTo) !== null);
+    }
 
-                return $end === null || $end >= $periodFrom;
-            });
+    /**
+     * Khoảng ngày CÒN PHẢI ra hoá đơn cho hợp đồng trong kỳ, null nếu đã hết.
+     *
+     * Hai biên:
+     *   - `from` = ngày sau ngày cuối cùng đã có hoá đơn. Nhờ vậy các hoá đơn nối
+     *     nhau liền mạch: không hở ngày nào (mất tiền phòng) và không chồng ngày
+     *     nào (thu hai lần). Hoá đơn đã huỷ không tính.
+     *   - `to`   = ngày ghi số mới nhất chưa tính tiền, chứ không phải cuối tháng.
+     *     Chốt sổ ngày 14 thì tiền phòng tính tới 14; phần còn lại của tháng để
+     *     dành cho lần chốt sau (hoặc cho hoá đơn tất toán khi khách trả phòng).
+     *     Với hợp đồng còn hiệu lực, mốc này không bao giờ vượt quá HÔM NAY —
+     *     chốt sổ là đóng sổ tới một thời điểm, không đóng trước tới ngày chưa
+     *     xảy ra. Nhờ vậy hợp đồng bắt đầu ngày mai chưa chốt sổ được, và lỡ tạo
+     *     hoá đơn nháp sớm cũng chỉ thu tiền phòng tới hôm nay.
+     *
+     * @return array{from: string, to: string}|null
+     */
+    private function segment(Contract $contract, string $periodFrom, string $periodTo): ?array
+    {
+        $from = max($periodFrom, $contract->start_date->toDateString());
+
+        $lastBilled = $this->lastBilledDay($contract->id);
+        if ($lastBilled !== null) {
+            $from = max($from, Carbon::parse($lastBilled)->addDay()->toDateString());
+        }
+
+        $end = $contract->effectiveEndDate();
+        $to = $end !== null ? min($periodTo, $end) : $periodTo;
+
+        $cutoff = $this->lastUnbilledReadDay($contract->id, $from, $to) ?? $to;
+
+        // Hợp đồng CÒN HIỆU LỰC thì không chốt quá hôm nay — chưa tới ngày thì
+        // chưa có gì để thu, kể cả khi ai đó lỡ ghi số ngày tương lai. Hợp đồng
+        // ĐÃ KẾT THÚC thì ngày trả phòng mới là mốc chuẩn, kể cả nếu nó ở tương
+        // lai (hẹn trước ngày trả), nên không chặn.
+        if ($end === null) {
+            $cutoff = min($cutoff, Carbon::today()->toDateString());
+        }
+
+        $to = min($to, $cutoff);
+
+        return $from <= $to ? ['from' => $from, 'to' => $to] : null;
+    }
+
+    /**
+     * Ngày cuối cùng đã nằm trong một hoá đơn còn hiệu lực của hợp đồng — tính
+     * trên MỌI kỳ, nên tháng quên chốt sổ sẽ tự dồn vào kỳ chốt kế tiếp thay vì
+     * mất luôn tiền phòng của tháng đó.
+     */
+    public function lastBilledDay(int $contractId): ?string
+    {
+        return Invoice::where('contract_id', $contractId)
+            ->where('status', '!=', Code::INVOICE_VOID)
+            ->max('period_to');
+    }
+
+    /** Ngày ghi số mới nhất chưa tính tiền trong khoảng — mốc để chốt tiền phòng. */
+    private function lastUnbilledReadDay(int $contractId, string $from, string $to): ?string
+    {
+        return MeterReading::where('contract_id', $contractId)
+            ->where('is_billed', false)
+            ->whereBetween('read_date', [$from, $to])
+            ->max('read_date');
     }
 
     /** Dựng các dòng hoá đơn cho một hợp đồng. Không ghi DB. */
     private function buildDraft(Contract $contract, string $periodYm, string $periodFrom, string $periodTo): array
     {
-        // Thu hẹp biên kỳ theo ngày vào / ngày trả phòng thực tế.
-        $from = max($periodFrom, $contract->start_date->toDateString());
-        $end = $contract->effectiveEndDate();
-        $to = $end !== null ? min($periodTo, $end) : $periodTo;
+        // Chỉ tính đoạn chưa ra hoá đơn — xem segment() để biết hai biên lấy từ đâu.
+        ['from' => $from, 'to' => $to] = $this->segment($contract, $periodFrom, $periodTo);
 
         $details = [];
         $readingIds = [];
@@ -685,11 +740,21 @@ class BillingService
 
     private function invoiceCode(string $periodYm, string $roomCode): string
     {
-        $base = "INV-{$periodYm}-{$roomCode}";
+        return $this->uniqueInvoiceCode("INV-{$periodYm}-{$roomCode}");
+    }
+
+    /**
+     * Thêm hậu tố -1, -2… cho tới khi mã chưa ai dùng.
+     *
+     * Phải dò cả hoá đơn ĐÃ XOÁ MỀM: unique index trên `code` không biết
+     * del_flag, nên xoá hoá đơn nháp rồi chốt sổ lại sẽ vỡ constraint.
+     */
+    public function uniqueInvoiceCode(string $base): string
+    {
         $suffix = 0;
         $code = $base;
 
-        while (Invoice::where('code', $code)->exists()) {
+        while (Invoice::withTrashed()->where('code', $code)->exists()) {
             $code = $base.'-'.(++$suffix);
         }
 

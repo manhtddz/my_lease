@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { useApi } from '@/lib/useApi'
+import { useMutation } from '@/lib/useMutation'
 import { date, money, moneyd, num, todayISO } from '@/lib/format'
 import { ErrorBox, Field, Spinner, useToast } from '@/components/ui'
 import { useConfirm } from '@/components/confirm'
@@ -38,21 +39,54 @@ export default function MoveOut() {
   const [deduction, setDeduction] = useState('0')
   const [reason, setReason] = useState('')
   const [refund, setRefund] = useState(true)
-  const [saving, setSaving] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
 
   const { data, error, loading, reload } = useApi(
-    () =>
+    (isAlive) =>
       api.moveOutPreview(id!, endDate).then((res) => {
+        // Đổi ngày trả phòng liên tục thì response cũ có thể về sau.
+        if (!isAlive()) return res
+
         setReadings(res.meters.map((m) => ({ ...m, reading: String(m.prev_reading) })))
         return res
       }),
     [id, endDate],
+    { enabled: !!id },
+  )
+
+  const submitMut = useMutation(
+    (payload: Parameters<typeof api.moveOut>[1]) => api.moveOut(id!, payload),
+    {
+      success: (r) => `Đã tất toán. Hoá đơn ${r.code}.`,
+      onSuccess: (r) => navigate(`/invoices/${r.invoice_id}`),
+    },
   )
 
   if (loading || !readings) return <Spinner />
   if (error) return <ErrorBox error={error} onRetry={reload} />
   if (!data) return null
+
+  // Vào thẳng bằng URL cho hợp đồng chưa tới ngày vào — cả trang vô nghĩa,
+  // chặn hẳn thay vì để điền hết rồi mới báo lỗi lúc bấm nút.
+  if (data.start_date > todayISO()) {
+    return (
+      <div className="mx-auto max-w-2xl space-y-4">
+        <Link to="/contracts" className="text-sm text-sky-700 hover:underline">
+          ← Hợp đồng
+        </Link>
+        <div className="card border-amber-300 bg-amber-50 p-5 text-sm text-amber-900">
+          <div className="font-semibold">Hợp đồng chưa bắt đầu</div>
+          <p className="mt-1">
+            {data.tenant_name} thuê phòng {data.room_code} từ {date(data.start_date)} — chưa ở ngày
+            nào thì chưa trả phòng được.
+          </p>
+          <p className="mt-2 text-xs">
+            Nếu khách đổi ý không thuê nữa thì đó là huỷ hợp đồng, không phải trả phòng.
+          </p>
+        </div>
+      </div>
+    )
+  }
 
   // Ước tính hiển thị — số chính thức do backend dựng lại lúc submit.
   const daysInMonth = new Date(Number(endDate.slice(0, 4)), Number(endDate.slice(5, 7)), 0).getDate()
@@ -74,10 +108,12 @@ export default function MoveOut() {
       ])
     })
 
+    // So với NGÀY VÀO, không so với period_from: period_from là ngày sau đoạn đã
+    // ra hoá đơn, nên khách trả đủ tới ngày 14 rồi đi ngày 14 sẽ bị chặn oan.
     raw.end_date = check(
       'end_date',
       endDate,
-      [required, dateAfter(data.period_from, 'ngày bắt đầu kỳ tính tiền')],
+      [required, dateAfter(data.start_date, 'ngày vào')],
       'Ngày trả phòng',
     )
 
@@ -116,22 +152,13 @@ export default function MoveOut() {
     })
     if (!agreed) return
 
-    setSaving(true)
-    try {
-      const result = await api.moveOut(id!, {
-        end_date: endDate,
-        meter_readings: readings.map((m) => ({ meter_id: m.meter_id, reading: Number(m.reading) })),
-        deposit_deduction: Number(deduction) || 0,
-        deduction_reason: reason || null,
-        refund_deposit: refund,
-      })
-      toast.success(`Đã tất toán. Hoá đơn ${result.code}.`)
-      navigate(`/invoices/${result.invoice_id}`)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setSaving(false)
-    }
+    await submitMut.run({
+      end_date: endDate,
+      meter_readings: readings.map((m) => ({ meter_id: m.meter_id, reading: Number(m.reading) })),
+      deposit_deduction: Number(deduction) || 0,
+      deduction_reason: reason || null,
+      refund_deposit: refund,
+    })
   }
 
   return (
@@ -149,9 +176,18 @@ export default function MoveOut() {
         <Field error={errors.end_date} className="w-48">
           <input type="date" className="field" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
         </Field>
-        <p className="mt-1 text-xs text-slate-500">
-          Kỳ tính: {date(data.period_from)} → {date(endDate)} ({data.days} ngày)
-        </p>
+        {data.billable ? (
+          <p className="mt-1 text-xs text-slate-500">
+            Kỳ tính: {date(data.period_from)} → {date(endDate)} ({data.days} ngày)
+            {data.billed_to && <> · đã chốt sổ tới {date(data.billed_to)}</>}
+          </p>
+        ) : (
+          <div className="mt-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+            ℹ Đã ra hoá đơn tới hết ngày <b>{date(data.billed_to)}</b>, tức là khách đã được
+            tính tiền quá ngày đi. Tất toán này <b>không phát sinh thêm tiền</b> — chỉ kết thúc
+            hợp đồng và xử lý cọc.
+          </div>
+        )}
       </Section>
 
       <Section title="2 · Chốt số đồng hồ tại ngày trả">
@@ -234,8 +270,8 @@ export default function MoveOut() {
         <Link to="/" className="btn-ghost">
           Huỷ
         </Link>
-        <button className="btn-primary" disabled={saving} onClick={submit}>
-          {saving ? 'Đang xử lý…' : 'TẤT TOÁN & TRẢ PHÒNG'}
+        <button className="btn-primary" disabled={submitMut.busy} onClick={submit}>
+          {submitMut.busy ? 'Đang xử lý…' : 'TẤT TOÁN & TRẢ PHÒNG'}
         </button>
       </div>
     </div>

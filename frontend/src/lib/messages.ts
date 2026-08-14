@@ -54,6 +54,12 @@ export const FIELD = {
   // cấu hình
   due_days: 'Số ngày tới hạn',
   default_price: 'Giá mặc định',
+
+  // phòng
+  room_code: 'Mã phòng',
+  building_id: 'Toà / dãy',
+  area_m2: 'Diện tích',
+  default_rent: 'Tiền phòng mặc định',
 } as const
 
 /** Khoá field đã khai. Truyền khoá lạ vào `check()` sẽ bị tsc chặn. */
@@ -83,7 +89,6 @@ export const MESSAGE = {
   // màn ghi số — có tiền tố {where} để biết dòng nào của bảng
   readNotNumber: '{where}: không phải số',
   readNegative: '{where}: không được âm',
-  readBilled: '{where}: đã chốt sổ, không sửa được',
   readRollover: '{where}: số mới nhỏ hơn số cũ — đang tính là đồng hồ quay vòng',
   readZero: '{where}: tiêu thụ 0 dù phòng đang có người',
   readTooHigh: '{where}: {value} — cao gấp {times} lần trung bình ({average})',

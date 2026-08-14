@@ -65,6 +65,16 @@ return [
 
         'room_id' => 'phòng',
         'tenant_id' => 'người thuê',
+
+        'building_id' => 'toà/dãy',
+        'code' => 'mã phòng',
+        'area_m2' => 'diện tích',
+        'default_rent' => 'tiền phòng mặc định',
+        'status' => 'trạng thái',
+        'electric_initial' => 'chỉ số điện gốc',
+        'water_initial' => 'chỉ số nước gốc',
+        'meter_installed_at' => 'ngày lắp đồng hồ',
+
         'tenant.full_name' => 'họ tên',
         'tenant.phone' => 'số điện thoại',
         'tenant.id_card_no' => 'CCCD/CMND',

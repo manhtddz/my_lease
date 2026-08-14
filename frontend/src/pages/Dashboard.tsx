@@ -2,8 +2,9 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { useApi } from '@/lib/useApi'
-import { currentPeriod, moneyd, moneyShort, nextPeriod, period, prevPeriod } from '@/lib/format'
+import { currentPeriod, date, moneyd, moneyShort, todayISO } from '@/lib/format'
 import { Badge, ErrorBox, Spinner } from '@/components/ui'
+import { PeriodNav } from '@/components/PeriodNav'
 import {
   ROOM_STATUS_LABEL,
   ROOM_TONE,
@@ -55,17 +56,7 @@ export default function Dashboard() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-bold text-slate-900">Tổng quan</h1>
-        <div className="flex items-center gap-1">
-          <button className="btn-ghost px-2 py-1" onClick={() => setViewPeriod(prevPeriod(viewPeriod))}>
-            ‹
-          </button>
-          <span className="min-w-24 text-center text-sm font-semibold tabular-nums">
-            Kỳ {period(viewPeriod)}
-          </span>
-          <button className="btn-ghost px-2 py-1" onClick={() => setViewPeriod(nextPeriod(viewPeriod))}>
-            ›
-          </button>
-        </div>
+        <PeriodNav value={viewPeriod} onChange={(p) => p && setViewPeriod(p)} />
       </div>
 
       {/* Dải cảnh báo — nói rõ việc tiếp theo phải làm là gì */}
@@ -119,6 +110,7 @@ function Stat({ label, value, tone }: { label: string; value: number; tone: stri
 
 function RoomCard({ room }: { room: DashboardRoom }) {
   const contract = room.contract
+  const started = contract !== null && contract.start_date <= todayISO()
 
   return (
     <div className="card flex flex-col p-4">
@@ -156,9 +148,22 @@ function RoomCard({ room }: { room: DashboardRoom }) {
                 Hoá đơn
               </Link>
             )}
-            <Link to={`/contracts/${contract.id}/move-out`} className="btn-ghost flex-1 px-2 py-1 text-xs">
-              Trả phòng
-            </Link>
+            {/* Chưa tới ngày vào thì chưa ở ngày nào — không có gì để tất toán. */}
+            {started ? (
+              <Link
+                to={`/contracts/${contract.id}/move-out`}
+                className="btn-ghost flex-1 px-2 py-1 text-xs"
+              >
+                Trả phòng
+              </Link>
+            ) : (
+              <span
+                className="btn-ghost flex-1 cursor-not-allowed px-2 py-1 text-center text-xs opacity-40"
+                title={`Hợp đồng bắt đầu ${date(contract.start_date)} — chưa trả phòng được`}
+              >
+                Trả phòng
+              </span>
+            )}
           </div>
         </>
       ) : (

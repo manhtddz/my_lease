@@ -9,6 +9,7 @@ use App\Models\ContractService;
 use App\Models\Invoice;
 use App\Models\InvoiceDetail;
 use App\Models\Meter;
+use App\Models\MeterReading;
 use App\Models\Payment;
 use App\Models\Room;
 use App\Models\ServiceItem;
@@ -152,11 +153,19 @@ class TenancyService
         $periodFrom = $this->readings->firstDayOf($periodYm);
         $from = max($periodFrom, $contract->start_date->toDateString());
 
+        // Kỳ đã chốt sổ một phần thì tất toán chỉ tính từ ngày sau đó — hiển thị
+        // đúng khoảng mà hoá đơn tất toán sẽ tính, xem BillingService::segment().
+        $lastBilled = $this->billing->lastBilledDay($contract->id);
+        if ($lastBilled !== null) {
+            $from = max($from, Carbon::parse($lastBilled)->addDay()->toDateString());
+        }
+
         $meters = Meter::where('room_id', $contract->room_id)->where('is_active', true)->orderBy('type')->get();
         $meterRows = [];
 
         foreach ($meters as $meter) {
-            $last = $this->readings->lastReadingBefore($meter->id);
+            // Mốc cũ phải là lần đọc TRƯỚC ngày trả, không phải mắt xích cuối chuỗi.
+            $last = $this->readings->lastReadingBefore($meter->id, $endDate);
             $meterRows[] = [
                 'meter_id' => $meter->id,
                 'type' => $meter->type,
@@ -165,18 +174,123 @@ class TenancyService
             ];
         }
 
+        // Ngày trả nằm trong đoạn đã ra hoá đơn → không còn gì để tất toán.
+        // Xảy ra khi chọn ngày trả sớm hơn ngày đã chốt sổ.
+        $billable = $from <= $endDate;
+
         return [
             'contract_id' => $contract->id,
             'room_code' => $contract->room->code,
             'tenant_name' => $contract->tenant?->full_name,
+            'start_date' => $contract->start_date->toDateString(),
             'period_from' => $from,
             'period_to' => $endDate,
-            'days' => Carbon::parse($from)->diffInDays(Carbon::parse($endDate)) + 1,
+            'days' => $billable ? Carbon::parse($from)->diffInDays(Carbon::parse($endDate)) + 1 : 0,
+            'billable' => $billable,
+            'billed_to' => $lastBilled,
             'rent_amount' => $contract->rent_amount,
             'deposit_held' => $contract->depositHeld(),
             'carried_over' => $this->billing->carriedOver($contract->id, $periodYm),
             'meters' => $meterRows,
         ];
+    }
+
+    /**
+     * Huỷ hợp đồng CHƯA tới ngày vào — khách đặt trước rồi đổi ý.
+     *
+     * Khác trả phòng ở chỗ không có ngày nào đã ở: không sinh hoá đơn, không chốt
+     * số đồng hồ. Chỉ gỡ mốc đồng hồ đã ghi lúc nhận khách, hoàn cọc (trừ phạt
+     * nếu có) và trả phòng về trạng thái trống.
+     *
+     * Gỡ mốc đồng hồ là bắt buộc: mốc đó nằm ở ngày vào — tức tương lai — nên nếu
+     * để lại thì không ghi số cho phòng này được nữa (chèn giữa chuỗi).
+     */
+    public function cancel(Contract $contract, array $data = []): Contract
+    {
+        if ($contract->status !== Code::CONTRACT_ACTIVE) {
+            throw new RuntimeException('Hợp đồng không còn hiệu lực.');
+        }
+
+        if ($contract->start_date->toDateString() <= Carbon::today()->toDateString()) {
+            throw new RuntimeException(sprintf(
+                'Hợp đồng đã bắt đầu từ %s — dùng Trả phòng để tất toán, không huỷ được nữa.',
+                $contract->start_date->format('d/m/Y')
+            ));
+        }
+
+        if ($contract->invoices()->exists()) {
+            throw new RuntimeException(
+                'Hợp đồng đã có hoá đơn nên không huỷ được. Huỷ hoá đơn đó trước.'
+            );
+        }
+
+        return DB::transaction(function () use ($contract, $data) {
+            // 1. Gỡ mốc đồng hồ ghi lúc nhận khách. Chỉ gỡ mốc CHƯA tính tiền và
+            //    đúng ngày vào — không đụng chuỗi đọc của khách trước.
+            $meterIds = Meter::where('room_id', $contract->room_id)->pluck('id');
+
+            MeterReading::whereIn('meter_id', $meterIds)
+                ->where('read_date', $contract->start_date->toDateString())
+                ->where('reason', Code::READ_MOVE_IN)
+                ->where('is_billed', false)
+                ->get()
+                ->each
+                ->delete();
+
+            // 2. Cọc: trừ phạt (nếu có) rồi hoàn phần còn lại. Cùng cách ghi nhận
+            //    như trả phòng để lịch sử thu chi đọc nhất quán.
+            $held = $contract->depositHeld();
+            $deduct = min($held, (int) ($data['deposit_deduction'] ?? 0));
+            $refund = $held - $deduct;
+
+            if ($deduct > 0) {
+                Payment::create([
+                    'contract_id' => $contract->id,
+                    'invoice_id' => null,
+                    'kind' => Code::PAY_DEPOSIT_REFUND,
+                    'amount' => -$deduct,
+                    'paid_at' => Carbon::today()->toDateString(),
+                    'method' => Code::METHOD_OTHER,
+                    'note' => 'Phạt huỷ hợp đồng: '.($data['deduction_reason'] ?? 'không ghi lý do'),
+                ]);
+            }
+
+            if ($refund > 0 && ($data['refund_deposit'] ?? true)) {
+                Payment::create([
+                    'contract_id' => $contract->id,
+                    'invoice_id' => null,
+                    'kind' => Code::PAY_DEPOSIT_REFUND,
+                    'amount' => -$refund,
+                    'paid_at' => Carbon::today()->toDateString(),
+                    'method' => $data['refund_method'] ?? Code::METHOD_CASH,
+                    'note' => 'Hoàn cọc do huỷ hợp đồng',
+                ]);
+            }
+
+            $contract->update([
+                'status' => Code::CONTRACT_CANCELLED,
+                'note' => trim(($contract->note ?? '')."\nHuỷ: ".($data['reason'] ?? 'không ghi lý do')),
+            ]);
+
+            $contract->room->update(['status' => Code::ROOM_VACANT]);
+
+            AuditLog::warning(AuditLog::TENANCY, sprintf(
+                'Huỷ hợp đồng %s · phòng %s · %s · chưa tới ngày vào %s · hoàn cọc %s%s',
+                $contract->code,
+                $contract->room->code,
+                $contract->tenant?->full_name,
+                $contract->start_date->toDateString(),
+                number_format($refund, 0, ',', '.'),
+                $deduct > 0 ? ' · phạt '.number_format($deduct, 0, ',', '.') : ''
+            ), [
+                'contract_id' => $contract->id,
+                'deposit_deduction' => $deduct,
+                'deposit_refund' => $refund,
+                'reason' => $data['reason'] ?? null,
+            ]);
+
+            return $contract->refresh()->load(['tenant', 'room']);
+        });
     }
 
     /**
@@ -191,12 +305,39 @@ class TenancyService
             throw new RuntimeException('Hợp đồng không còn hiệu lực.');
         }
 
+        // Chưa tới ngày vào thì chưa có gì để tất toán. Muốn bỏ hợp đồng này thì
+        // là huỷ hợp đồng, không phải trả phòng — hai việc khác nhau.
+        if ($contract->start_date->toDateString() > Carbon::today()->toDateString()) {
+            throw new RuntimeException(sprintf(
+                'Hợp đồng chưa bắt đầu (ngày vào %s). Chưa ở ngày nào thì chưa trả phòng được.',
+                $contract->start_date->format('d/m/Y')
+            ));
+        }
+
         return DB::transaction(function () use ($contract, $data) {
             $endDate = $data['end_date'];
             $periodYm = Carbon::parse($endDate)->format('Ym');
 
             // 1. Chốt số đồng hồ tại ngày trả — đoạn này thuộc về khách đang ở.
+            //
+            //    Hoá đơn của kỳ này (nếu đã chốt sổ) chỉ phủ tới ngày ghi số gần
+            //    nhất, không phủ tới cuối tháng, nên KHÔNG cần huỷ nó: hoá đơn tất
+            //    toán bên dưới chỉ tính tiếp đoạn còn lại. Xem BillingService::segment().
             foreach ($data['meter_readings'] ?? [] as $entry) {
+                // Chuỗi chỉ số đã có mốc phủ tới ngày trả thì bỏ qua — ghi thêm chỉ
+                // để đụng khoá "đã tính tiền" / "chèn giữa chuỗi" mà không thêm gì:
+                //   - cùng ngày và đã chốt sổ → mốc đó chính là mốc trả phòng;
+                //   - có lần đọc sau ngày trả → khách đã trả tiền quá ngày đi.
+                $covered = MeterReading::where('meter_id', (int) $entry['meter_id'])
+                    ->where(fn ($q) => $q
+                        ->where(fn ($w) => $w->where('read_date', $endDate)->where('is_billed', true))
+                        ->orWhere('read_date', '>', $endDate))
+                    ->exists();
+
+                if ($covered) {
+                    continue;
+                }
+
                 $this->readings->record(
                     meterId: (int) $entry['meter_id'],
                     reading: (float) $entry['reading'],
@@ -208,65 +349,50 @@ class TenancyService
                 );
             }
 
-            // 2. Kỳ này có thể đã chốt sổ trước khi khách báo trả phòng. Hoá đơn cũ
-            //    phủ tới cuối tháng nên sai; huỷ nó để dựng lại theo ngày trả thực tế.
-            //    Chỉ tự huỷ khi chưa thu đồng nào — có tiền rồi thì người dùng phải tự quyết.
-            $existing = Invoice::where('contract_id', $contract->id)
-                ->where('period_ym', $periodYm)
-                ->whereNotIn('status', [Code::INVOICE_VOID])
-                ->first();
-
-            if ($existing) {
-                if ($existing->paid_amount > 0) {
-                    throw new RuntimeException(
-                        "Kỳ {$periodYm} đã có hoá đơn {$existing->code} và đã thu ".
-                        number_format($existing->paid_amount, 0, ',', '.').'đ. '.
-                        'Xử lý hoá đơn đó trước (hoàn tiền hoặc điều chỉnh) rồi tất toán lại.'
-                    );
-                }
-
-                $this->billing->void($existing, 'Khách trả phòng '.$endDate.' — dựng lại hoá đơn tất toán');
-            }
-
-            // 3. Kết thúc hợp đồng TRƯỚC khi dựng hoá đơn để biên kỳ tính đúng tới ngày trả.
+            // 2. Kết thúc hợp đồng TRƯỚC khi dựng hoá đơn để biên kỳ tính đúng tới ngày trả.
             $contract->update([
                 'actual_end_date' => $endDate,
                 'status' => Code::CONTRACT_ENDED,
             ]);
 
-            // 4. Hoá đơn tất toán — dùng chung cỗ máy chốt sổ, chỉ khác cờ is_settlement.
+            // 3. Hoá đơn tất toán — dùng chung cỗ máy chốt sổ, chỉ khác cờ is_settlement.
+            //    Chỉ gồm đoạn chưa ra hoá đơn: đã chốt sổ tới ngày 14 rồi thì hoá
+            //    đơn này tính từ ngày 15 tới ngày trả phòng.
             $preview = $this->billing->preview($periodYm);
             $draft = collect($preview['invoices'])->firstWhere('contract_id', $contract->id);
 
-            if (! $draft) {
-                throw new RuntimeException(
-                    'Không dựng được hoá đơn tất toán cho hợp đồng này. Kiểm tra lại chỉ số đồng hồ và kỳ '.$periodYm.'.'
-                );
-            }
+            // Không còn ngày nào phải tính — khách đã trả tiền tới hết ngày đi.
+            // Vẫn tất toán bình thường: hoá đơn bằng 0 để có chứng từ trả phòng và
+            // để phần xử lý cọc bên dưới có chỗ bám vào.
+            $subtotal = $draft['subtotal'] ?? 0;
+            $carriedOver = $draft['carried_over'] ?? $this->billing->carriedOver($contract->id, $periodYm);
+            $periodFrom = $draft['period_from'] ?? $endDate;
+            $periodTo = $draft['period_to'] ?? $endDate;
 
             $discount = (int) ($data['discount'] ?? 0);
-            $total = $draft['subtotal'] - $discount + $draft['carried_over'];
+            $total = $subtotal - $discount + $carriedOver;
 
             $invoice = Invoice::create([
-                'code' => "STL-{$periodYm}-{$contract->room->code}",
+                'code' => $this->billing->uniqueInvoiceCode("STL-{$periodYm}-{$contract->room->code}"),
                 'contract_id' => $contract->id,
                 'room_id' => $contract->room_id,
                 'period_ym' => $periodYm,
-                'period_from' => $draft['period_from'],
-                'period_to' => $draft['period_to'],
+                'period_from' => $periodFrom,
+                'period_to' => $periodTo,
                 'issue_date' => Carbon::today()->toDateString(),
                 'due_date' => $endDate,
-                'subtotal' => $draft['subtotal'],
+                'subtotal' => $subtotal,
                 'discount' => $discount,
-                'carried_over' => $draft['carried_over'],
+                'carried_over' => $carriedOver,
                 'total' => $total,
                 'paid_amount' => 0,
                 'is_settlement' => true,
-                'status' => Code::INVOICE_ISSUED,
+                // Hoá đơn 0đ coi như xong luôn, không bắt người dùng đi "thu 0đ".
+                'status' => $total > 0 ? Code::INVOICE_ISSUED : Code::INVOICE_PAID,
                 'note' => $data['note'] ?? null,
             ]);
 
-            foreach ($draft['details'] as $i => $line) {
+            foreach ($draft['details'] ?? [] as $i => $line) {
                 InvoiceDetail::create([
                     'invoice_id' => $invoice->id,
                     'service_item_id' => $line['service_item_id'],
@@ -279,11 +405,11 @@ class TenancyService
                 ]);
             }
 
-            if ($draft['reading_ids']) {
-                \App\Models\MeterReading::whereIn('id', $draft['reading_ids'])->update(['is_billed' => true]);
+            if ($draft['reading_ids'] ?? []) {
+                MeterReading::whereIn('id', $draft['reading_ids'])->update(['is_billed' => true]);
             }
 
-            // 4. Xử lý cọc: trừ hỏng hóc rồi hoàn phần còn lại.
+            // 4. Xử lý cọc: trừ hỏng hóc rồi hoàn phần còn lại. (giữ nguyên như cũ)
             $held = $contract->depositHeld();
             $deduct = min($held, (int) ($data['deposit_deduction'] ?? 0));
             $refund = $held - $deduct;

@@ -2,8 +2,10 @@ import { useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { useApi } from '@/lib/useApi'
-import { currentPeriod, date, monthInputToPeriod, num, period, periodToMonthInput } from '@/lib/format'
+import { useMutation } from '@/lib/useMutation'
+import { clampPeriod, currentPeriod, date, num, period } from '@/lib/format'
 import { Badge, ErrorBox, Spinner, useToast } from '@/components/ui'
+import { PeriodNav } from '@/components/PeriodNav'
 import { useConfirm } from '@/components/confirm'
 import { msg } from '@/lib/messages'
 import {
@@ -36,15 +38,22 @@ export default function Readings() {
   const toast = useToast()
   const confirm = useConfirm()
 
-  const [viewPeriod, setViewPeriod] = useState<PeriodYm>(() => params.get('period') ?? currentPeriod())
+  // Link cũ hoặc URL dán tay có thể trỏ tới kỳ tương lai — kéo về kỳ hiện tại.
+  const [viewPeriod, setViewPeriod] = useState<PeriodYm>(() => {
+    const fromUrl = params.get('period')
+    return fromUrl ? clampPeriod(fromUrl) : currentPeriod()
+  })
   const [readDate, setReadDate] = useState('')
   const [values, setValues] = useState<Record<number, string>>({})
   const [changed, setChanged] = useState<Record<number, boolean>>({})
-  const [saving, setSaving] = useState(false)
 
   const { data, error, loading, reload } = useApi(
-    () =>
+    (isAlive) =>
       api.readingSheet(viewPeriod).then((res) => {
+        // Đổi kỳ liên tục thì response cũ có thể về sau — bỏ qua để không
+        // ghi đè các ô nhập của kỳ đang xem.
+        if (!isAlive()) return res
+
         setReadDate(res.default_read_date)
         const initial: Record<number, string> = {}
         res.rows.forEach((row) =>
@@ -59,6 +68,11 @@ export default function Readings() {
     [viewPeriod],
   )
 
+  const saveMut = useMutation(
+    (payload: Parameters<typeof api.saveReadings>[0]) => api.saveReadings(payload),
+    { success: (r) => `Đã lưu ${r.saved} chỉ số.`, onSuccess: () => reload() },
+  )
+
   // Hằng số ngoài render: `?? []` tạo mảng mới mỗi lần, làm useMemo bên dưới
   // tính lại vô ích ở mọi lần render.
   const rows = data?.rows ?? EMPTY_ROWS
@@ -68,6 +82,11 @@ export default function Readings() {
 
     rows.forEach((row) =>
       row.meters.forEach((m) => {
+        // Ô đã chốt sổ không phải lỗi — nó chỉ khoá. Input đã disabled và save()
+        // đã bỏ qua, nên coi là lỗi chỉ tổ khoá nút Lưu của CẢ BẢNG và chặn ghi
+        // số cho những phòng khác trong cùng kỳ.
+        if (m.existing?.is_billed) return
+
         const raw = values[m.meter_id]
         if (raw === undefined || raw === '') return
         const curr = Number(raw)
@@ -88,7 +107,6 @@ export default function Readings() {
         // Lỗi: chặn lưu. Cảnh báo: cho lưu nhưng phải xác nhận.
         if (Number.isNaN(Number(raw))) errors.push(msg('readNotNumber', null, { where }))
         if (Number(raw) < 0) errors.push(msg('readNegative', null, { where }))
-        if (m.existing?.is_billed) errors.push(msg('readBilled', null, { where }))
 
         if (rolled && !changed[m.meter_id]) warnings.push(msg('readRollover', null, { where }))
         if (consumption === 0 && row.room_status === RoomStatus.Occupied) {
@@ -112,8 +130,31 @@ export default function Readings() {
     return out
   }, [rows, values, changed])
 
-  const filled = Object.values(values).filter((v) => v !== '' && v !== undefined).length
-  const totalMeters = rows.reduce((sum, r) => sum + (r.blocked ? 0 : r.meters.length), 0)
+  /**
+   * Ô còn sửa được: bỏ dòng bị chặn (đổi khách giữa kỳ) và ô đã chốt sổ.
+   * Mọi bộ đếm dưới đây tính trên tập này để con số trên màn khớp với số ô
+   * người dùng thực sự thao tác được.
+   */
+  const editableMeters = rows.flatMap((row) =>
+    row.blocked ? [] : row.meters.filter((m) => !m.existing?.is_billed),
+  )
+
+  const totalMeters = editableMeters.length
+  const filled = editableMeters.filter((m) => {
+    const v = values[m.meter_id]
+    return v !== undefined && v !== ''
+  }).length
+
+  /**
+   * Số ô lệch so với dữ liệu đã lưu.
+   *
+   * Khác `filled`: mở một kỳ đã ghi xong thì `filled` vẫn đếm hết các ô, nên nút
+   * "Huỷ thay đổi" bật lên dù chưa sửa gì và thông báo nói sẽ xoá cả số đã lưu.
+   */
+  const dirtyCount = editableMeters.filter((m) => {
+    const saved = m.existing ? String(m.existing.reading) : ''
+    return (values[m.meter_id] ?? '') !== saved || !!changed[m.meter_id]
+  }).length
   const allWarnings = Object.values(computed).flatMap((c) => c.warnings)
   const allErrors = Object.values(computed).flatMap((c) => c.errors)
 
@@ -133,42 +174,32 @@ export default function Readings() {
       if (!agreed) return
     }
 
-    setSaving(true)
-    try {
-      const entries: BulkReadingEntry[] = []
+    const entries: BulkReadingEntry[] = []
 
-      rows.forEach((row) => {
-        if (row.blocked) return
-        row.meters.forEach((m) => {
-          const raw = values[m.meter_id]
-          if (raw === undefined || raw === '') return
-          if (m.existing?.is_billed) return
-          entries.push({
-            meter_id: m.meter_id,
-            reading: Number(raw),
-            meter_changed: !!changed[m.meter_id],
-          })
+    rows.forEach((row) => {
+      if (row.blocked) return
+      row.meters.forEach((m) => {
+        const raw = values[m.meter_id]
+        if (raw === undefined || raw === '') return
+        if (m.existing?.is_billed) return
+        entries.push({
+          meter_id: m.meter_id,
+          reading: Number(raw),
+          meter_changed: !!changed[m.meter_id],
         })
       })
+    })
 
-      if (!entries.length) {
-        toast.error(msg('nothingEntered'))
-        return
-      }
-
-      const result = await api.saveReadings({
-        period_ym: viewPeriod,
-        read_date: readDate,
-        entries,
-      })
-
-      toast.success(`Đã lưu ${result.saved} chỉ số.`)
-      reload()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setSaving(false)
+    if (!entries.length) {
+      toast.error(msg('nothingEntered'))
+      return
     }
+
+    const saved = await saveMut.run({ period_ym: viewPeriod, read_date: readDate, entries })
+
+    // Lưu từng phần: chỉ cần một dòng lỗi là API trả 422, nhưng các dòng hợp lệ
+    // VẪN đã ghi vào DB. Không tải lại thì bảng còn hiện số cũ của những dòng đó.
+    if (!saved) reload()
   }
 
   if (loading) return <Spinner />
@@ -184,12 +215,7 @@ export default function Readings() {
         <div className="flex items-end gap-3">
           <div>
             <label className="label">Kỳ</label>
-            <input
-              type="month"
-              className="field"
-              value={periodToMonthInput(viewPeriod)}
-              onChange={(e) => setViewPeriod(monthInputToPeriod(e.target.value))}
-            />
+            <PeriodNav value={viewPeriod} onChange={(p) => p && setViewPeriod(p)} />
           </div>
           <div>
             <label className="label">Ngày ghi thực tế</label>
@@ -304,15 +330,18 @@ export default function Readings() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-sm text-slate-500">
           Đã nhập <b className="text-slate-800">{filled}</b>/{totalMeters} ô · ngày ghi {date(readDate)}
+          {dirtyCount > 0 && (
+            <span className="ml-2 font-medium text-amber-700">· {dirtyCount} ô chưa lưu</span>
+          )}
         </div>
         <div className="flex gap-2">
           <button
             className="btn-ghost"
-            disabled={saving || filled === 0}
+            disabled={saveMut.busy || dirtyCount === 0}
             onClick={async () => {
               const agreed = await confirm({
-                title: 'Bỏ các số vừa nhập?',
-                message: `${filled} ô bạn vừa nhập sẽ bị xoá và tải lại từ dữ liệu đã lưu.`,
+                title: 'Bỏ các thay đổi chưa lưu?',
+                message: `${dirtyCount} ô bạn vừa sửa sẽ quay về giá trị đã lưu. Chỉ số đã lưu trong sổ không bị xoá.`,
                 confirmLabel: 'Bỏ thay đổi',
                 tone: 'danger',
               })
@@ -324,9 +353,9 @@ export default function Readings() {
           <button
             className="btn-primary"
             onClick={save}
-            disabled={saving || filled === 0 || allErrors.length > 0}
+            disabled={saveMut.busy || filled === 0 || allErrors.length > 0}
           >
-            {saving ? 'Đang lưu…' : `LƯU ${filled}/${totalMeters} DÒNG`}
+            {saveMut.busy ? 'Đang lưu…' : `LƯU ${filled}/${totalMeters} DÒNG`}
           </button>
         </div>
       </div>

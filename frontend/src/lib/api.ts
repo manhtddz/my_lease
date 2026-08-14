@@ -2,12 +2,16 @@ import axios, { type AxiosError } from 'axios'
 import type {
   BillingCommitResponse,
   BillingPreviewResponse,
+  BuildingListResponse,
   BulkReadingPayload,
   BulkReadingResponse,
+  CancelContractPayload,
+  CancelContractResponse,
   ContractDetailResponse,
   ContractListResponse,
   ContractStatus,
   CreateExpensePayload,
+  CreateRoomPayload,
   DeletedResponse,
   Expense,
   ExpenseListResponse,
@@ -30,7 +34,9 @@ import type {
   PeriodYm,
   ReadingListResponse,
   ReadingSheetResponse,
+  Room,
   RoomListResponse,
+  RoomPayload,
   ServiceItem,
   ServiceItemListResponse,
   SettingsResponse,
@@ -48,21 +54,41 @@ const client = axios.create({
   headers: { Accept: 'application/json' },
 })
 
-/** Hình dạng lỗi Laravel trả về. */
-interface LaravelError {
+/** Một dòng lỗi của endpoint xử lý hàng loạt, ví dụ /readings/bulk. */
+interface RowError {
   message?: string
-  errors?: Record<string, string[]>
+}
+
+/**
+ * Hình dạng lỗi backend trả về — có hai kiểu:
+ *   - validate của Laravel: `{ field: ['câu lỗi', ...] }`
+ *   - lỗi theo dòng của endpoint hàng loạt: `[{ meter_id, message }, ...]`
+ */
+interface ApiError {
+  message?: string
+  errors?: Record<string, string[]> | Array<RowError | string>
+}
+
+/** Gom mọi hình dạng lỗi về một chuỗi đọc được. */
+function readErrorMessage(data: ApiError | undefined, fallback: string): string {
+  if (data?.message) return data.message
+
+  const { errors } = data ?? {}
+  if (!errors) return fallback
+
+  const lines = Array.isArray(errors)
+    ? errors.map((e) => (typeof e === 'string' ? e : e?.message)).filter(Boolean)
+    : Object.values(errors).flat()
+
+  // Không join mảng object thô: ra "[object Object]" thay vì câu tiếng Việt.
+  return lines.length ? lines.join('\n') : fallback
 }
 
 /** Ném ra message tiếng Việt từ backend thay vì "Request failed with status 422". */
 client.interceptors.response.use(
   (res) => res,
-  (error: AxiosError<LaravelError>) => {
-    const data = error.response?.data
-    const message =
-      data?.message ||
-      (data?.errors && Object.values(data.errors).flat().join('\n')) ||
-      error.message
+  (error: AxiosError<ApiError>) => {
+    const message = readErrorMessage(error.response?.data, error.message)
     return Promise.reject(new Error(message))
   },
 )
@@ -127,13 +153,21 @@ export const api = {
   moveInDefaults: (room_id: number | string) =>
     get<MoveInDefaultsResponse>('/contracts/move-in-defaults', { room_id }),
   moveIn: (payload: MoveInPayload) => post<MoveInResponse>('/contracts/move-in', payload),
+  cancelContract: (id: number | string, payload: CancelContractPayload) =>
+    post<CancelContractResponse>(`/contracts/${id}/cancel`, payload),
   moveOutPreview: (id: number | string, end_date: IsoDate) =>
     get<MoveOutPreviewResponse>(`/contracts/${id}/move-out-preview`, { end_date }),
   moveOut: (id: number | string, payload: MoveOutPayload) =>
     post<MoveOutResponse>(`/contracts/${id}/move-out`, payload),
 
-  // --- danh mục / chi phí / cấu hình / báo cáo ---
+  // --- phòng ---
+  buildings: () => get<BuildingListResponse>('/buildings'),
   rooms: () => get<RoomListResponse>('/rooms'),
+  createRoom: (payload: CreateRoomPayload) => post<Room>('/rooms', payload),
+  updateRoom: (id: number, payload: RoomPayload) => put<Room>(`/rooms/${id}`, payload),
+  deleteRoom: (id: number) => del<DeletedResponse>(`/rooms/${id}`),
+
+  // --- danh mục / chi phí / cấu hình / báo cáo ---
   tenants: () => get<TenantListResponse>('/tenants'),
   expenses: (params?: { period?: PeriodYm }) => get<ExpenseListResponse>('/expenses', params),
   createExpense: (payload: CreateExpensePayload) => post<Expense>('/expenses', payload),

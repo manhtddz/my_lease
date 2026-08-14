@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { useApi } from '@/lib/useApi'
+import { useMutation } from '@/lib/useMutation'
 import { date, money, moneyd, num } from '@/lib/format'
 import { ErrorBox, Field as FormField, Spinner, useToast } from '@/components/ui'
 import { useConfirm } from '@/components/confirm'
@@ -71,13 +72,14 @@ export default function MoveIn() {
   const confirm = useConfirm()
 
   const [step, setStep] = useState(0)
-  const [saving, setSaving] = useState(false)
   const [form, setForm] = useState<MoveInForm | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
 
   const { data, error, loading, reload } = useApi(
-    () =>
+    (isAlive) =>
       api.moveInDefaults(roomId!).then((res) => {
+        if (!isAlive()) return res
+
         const toRow = (s: ServiceDefault): ServiceRow => ({ ...s, unit_price: String(s.unit_price) })
 
         setForm({
@@ -104,6 +106,12 @@ export default function MoveIn() {
         return res
       }),
     [roomId],
+    { enabled: !!roomId },
+  )
+
+  const submitMut = useMutation(
+    (payload: Parameters<typeof api.moveIn>[0]) => api.moveIn(payload),
+    { success: (r) => `Đã tạo hợp đồng ${r.code}.`, onSuccess: () => navigate('/') },
   )
 
   if (loading || !form) return <Spinner />
@@ -233,38 +241,29 @@ export default function MoveIn() {
     })
     if (!agreed) return
 
-    setSaving(true)
-    try {
-      const result = await api.moveIn({
-        room_id: Number(roomId),
-        tenant: {
-          ...form.tenant,
-          dob: form.tenant.dob || null,
-        },
-        start_date: form.start_date,
-        end_date: form.end_date || null,
-        rent_amount: Number(form.rent_amount),
-        deposit_amount: Number(form.deposit_amount),
-        occupant_count: Number(form.occupant_count),
-        note: form.note || null,
-        occupants: form.occupants.filter((o) => o.full_name.trim()),
-        services: form.services.map((s) => ({
-          service_item_id: s.service_item_id,
-          unit_price: Number(s.unit_price),
-          quantity_fixed: s.quantity_fixed ? Number(s.quantity_fixed) : null,
-        })),
-        meter_readings: form.meter_readings.map((m) => ({
-          meter_id: m.meter_id,
-          reading: Number(m.reading),
-        })),
-      })
-      toast.success(`Đã tạo hợp đồng ${result.code}.`)
-      navigate('/')
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setSaving(false)
-    }
+    await submitMut.run({
+      room_id: Number(roomId),
+      tenant: {
+        ...form.tenant,
+        dob: form.tenant.dob || null,
+      },
+      start_date: form.start_date,
+      end_date: form.end_date || null,
+      rent_amount: Number(form.rent_amount),
+      deposit_amount: Number(form.deposit_amount),
+      occupant_count: Number(form.occupant_count),
+      note: form.note || null,
+      occupants: form.occupants.filter((o) => o.full_name.trim()),
+      services: form.services.map((s) => ({
+        service_item_id: s.service_item_id,
+        unit_price: Number(s.unit_price),
+        quantity_fixed: s.quantity_fixed ? Number(s.quantity_fixed) : null,
+      })),
+      meter_readings: form.meter_readings.map((m) => ({
+        meter_id: m.meter_id,
+        reading: Number(m.reading),
+      })),
+    })
   }
 
   return (
@@ -600,8 +599,8 @@ export default function MoveIn() {
             Tiếp →
           </button>
         ) : (
-          <button className="btn-primary" disabled={saving} onClick={submit}>
-            {saving ? 'Đang lưu…' : 'HOÀN TẤT'}
+          <button className="btn-primary" disabled={submitMut.busy} onClick={submit}>
+            {submitMut.busy ? 'Đang lưu…' : 'HOÀN TẤT'}
           </button>
         )}
       </div>

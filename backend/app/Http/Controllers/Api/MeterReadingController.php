@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Enums\Code;
 use App\Http\Controllers\Controller;
+use App\Models\Meter;
 use App\Models\MeterReading;
 use App\Services\MeterReadingService;
 use Illuminate\Http\Request;
@@ -44,7 +45,35 @@ class MeterReadingController extends Controller
             $data['period_ym'],
         );
 
-        return response()->json($result, $result['errors'] ? 422 : 200);
+        if (! $result['errors']) {
+            return response()->json($result);
+        }
+
+        // Gộp sẵn thành `message` — lỗi ở đây theo DÒNG chứ không theo field, nên
+        // client không tự dựng câu từ mảng object được.
+        //
+        // Kèm vị trí (phòng + loại đồng hồ) vào từng dòng: lưu 12 ô một lượt mà
+        // báo lỗi trống không thì không biết phải sửa ô nào.
+        $meters = Meter::with('room')
+            ->whereIn('id', array_column($result['errors'], 'meter_id'))
+            ->get()
+            ->keyBy('id');
+
+        $lines = array_map(function (array $error) use ($meters) {
+            $meter = $meters->get($error['meter_id']);
+
+            $where = $meter
+                ? trim($meter->room?->code.' '.($meter->type === Code::METER_ELECTRIC ? 'điện' : 'nước'))
+                : "đồng hồ #{$error['meter_id']}";
+
+            return "{$where}: {$error['message']}";
+        }, $result['errors']);
+
+        $result['message'] = ($result['saved'] > 0
+            ? "Đã lưu {$result['saved']} chỉ số. Không lưu được ".count($lines)." dòng:\n"
+            : '').implode("\n", $lines);
+
+        return response()->json($result, 422);
     }
 
     public function index(Request $request)

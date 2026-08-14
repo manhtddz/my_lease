@@ -8,6 +8,7 @@ import Billing from '@/pages/Billing'
 import Invoices from '@/pages/Invoices'
 import InvoiceDetail from '@/pages/InvoiceDetail'
 import Contracts from '@/pages/Contracts'
+import Rooms from '@/pages/Rooms'
 import MoveIn from '@/pages/MoveIn'
 import MoveOut from '@/pages/MoveOut'
 import Expenses from '@/pages/Expenses'
@@ -26,6 +27,7 @@ const NAV: NavItem[] = [
   { to: '/billing', label: 'Chốt sổ' },
   { to: '/invoices', label: 'Hoá đơn' },
   { to: '/contracts', label: 'Hợp đồng' },
+  { to: '/rooms', label: 'Phòng' },
   { to: '/expenses', label: 'Chi phí' },
   { to: '/report', label: 'Báo cáo' },
   { to: '/settings', label: 'Cấu hình' },
@@ -77,6 +79,7 @@ export default function App() {
               <Route path="/contracts" element={<Contracts />} />
               <Route path="/contracts/move-in/:roomId" element={<MoveIn />} />
               <Route path="/contracts/:id/move-out" element={<MoveOut />} />
+              <Route path="/rooms" element={<Rooms />} />
               <Route path="/expenses" element={<Expenses />} />
               <Route path="/report" element={<Report />} />
               <Route path="/settings" element={<Settings />} />

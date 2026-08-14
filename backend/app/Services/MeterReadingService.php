@@ -39,11 +39,27 @@ class MeterReadingService
             $meters = [];
 
             foreach ($room->meters as $meter) {
-                $last = $this->lastReadingBefore($meter->id);
-                $existing = MeterReading::where('meter_id', $meter->id)
-                    ->where('period_ym', $periodYm)
-                    ->where('reason', Code::READ_MONTHLY)
-                    ->first();
+                // Mắt xích cuối tính tới hết kỳ đang xem — số của kỳ sau không
+                // được tràn ngược vào kỳ cũ.
+                $chainTail = $this->lastReadingUpTo($meter->id, $this->lastDayOf($periodYm));
+
+                // Ô nhập chỉ "đang sửa lại" khi mắt xích cuối là lần đọc định kỳ
+                // của chính kỳ này và CHƯA tính tiền. Còn lại — đã chốt sổ, hoặc
+                // mốc cuối là trả phòng / nhận khách giữa tháng — thì coi như đã
+                // xong: mốc đó thành số "cũ" và ô nhập để trống chờ mốc tiếp theo.
+                // Nhờ vậy phòng đổi khách giữa tháng vẫn ghi số tiếp được.
+                $isEditable = $chainTail !== null
+                    && $chainTail->period_ym === $periodYm
+                    && $chainTail->reason === Code::READ_MONTHLY
+                    && ! $chainTail->is_billed;
+
+                $existing = $isEditable ? $chainTail : null;
+
+                // Đang sửa dòng nào thì mốc "cũ" là mắt xích TRƯỚC dòng đó — lấy
+                // chính nó sẽ ra tiêu thụ 0.
+                $last = $existing
+                    ? $this->lastReadingBefore($meter->id, $existing->read_date->toDateString())
+                    : $chainTail;
 
                 $meters[] = [
                     'meter_id' => $meter->id,
@@ -325,6 +341,19 @@ class MeterReadingService
     {
         return MeterReading::where('meter_id', $meterId)
             ->when($beforeDate, fn ($q) => $q->where('read_date', '<', $beforeDate))
+            ->orderByDesc('read_date')
+            ->orderByDesc('id')
+            ->first();
+    }
+
+    /**
+     * Như lastReadingBefore nhưng LẤY CẢ ngày mốc.
+     * Dùng khi chặn theo cuối kỳ: đọc đúng ngày cuối tháng vẫn thuộc kỳ đó.
+     */
+    public function lastReadingUpTo(int $meterId, string $onOrBeforeDate): ?MeterReading
+    {
+        return MeterReading::where('meter_id', $meterId)
+            ->where('read_date', '<=', $onOrBeforeDate)
             ->orderByDesc('read_date')
             ->orderByDesc('id')
             ->first();

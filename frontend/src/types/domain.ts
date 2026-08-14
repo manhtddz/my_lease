@@ -1,4 +1,5 @@
 import type {
+  BuildingType,
   ContractStatus,
   ExpenseCategory,
   Gender,
@@ -33,6 +34,7 @@ export type IsoDate = string
 export interface Building {
   id: number
   name: string
+  type: BuildingType
 }
 
 export interface Room {
@@ -42,6 +44,13 @@ export interface Room {
   building_name: string
   status: RoomStatus
   default_rent: number
+  area_m2: number | null
+  note: string | null
+  /** Khách đang thuê — null khi phòng trống. */
+  tenant_name: string | null
+  contract_id: number | null
+  /** Số đồng hồ đã gắn; thiếu đồng hồ thì màn Ghi số bỏ qua phòng. */
+  meter_count: number
 }
 
 // --------------------------------------------------------- người thuê & HĐ

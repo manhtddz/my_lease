@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { useApi } from '@/lib/useApi'
+import { useMutation } from '@/lib/useMutation'
 import { date, money, moneyd, num, period } from '@/lib/format'
 import { Badge, ErrorBox, Spinner, useToast } from '@/components/ui'
 import { useConfirm } from '@/components/confirm'
@@ -38,14 +39,48 @@ export default function InvoiceDetail() {
   const toast = useToast()
   const confirm = useConfirm()
 
-  const [busy, setBusy] = useState(false)
   const [payOpen, setPayOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   const [draftLines, setDraftLines] = useState<DraftLine[]>([])
   const [draftDiscount, setDraftDiscount] = useState('0')
   const [editErrors, setEditErrors] = useState<Errors>({})
 
-  const { data, error, loading, reload } = useApi(() => api.invoice(id!), [id])
+  const { data, error, loading, reload } = useApi(() => api.invoice(id!), [id], { enabled: !!id })
+
+  /** Runner chung cho các thao tác một-bước: phát hành, xoá, huỷ, thu tiền. */
+  const actMut = useMutation(
+    async (task: { fn: () => Promise<unknown>; message: string }) => {
+      await task.fn()
+      return task.message
+    },
+    { success: (message) => message, onSuccess: () => reload() },
+  )
+
+  // Thông báo gộp nhiều dòng nên tự toast trong onSuccess thay vì dùng `success`.
+  const saveEditsMut = useMutation(
+    (payload: Parameters<typeof api.updateInvoiceDetails>[1]) =>
+      api.updateInvoiceDetails(id!, payload),
+    {
+      onSuccess: (result) => {
+        const parts = ['Đã cập nhật hoá đơn.']
+        if (result.synced.length) {
+          parts.push(`Đã ghi ngược ${result.synced.length} chỉ số về sổ đồng hồ.`)
+        }
+        if (result.unsynced.length) {
+          parts.push(
+            `Không đồng bộ được sổ đồng hồ cho: ${result.unsynced.join(', ')} (dòng gộp nhiều lần đọc).`,
+          )
+        }
+        toast.success(parts.join('\n'))
+
+        setEditing(false)
+        setEditErrors({})
+        reload()
+      },
+    },
+  )
+
+  const busy = actMut.busy || saveEditsMut.busy
 
   if (loading) return <Spinner />
   if (error) return <ErrorBox error={error} onRetry={reload} />
@@ -72,17 +107,8 @@ export default function InvoiceDetail() {
     setDraftLines((lines) => lines.map((l) => (l.id === lineId ? { ...l, [key]: value } : l)))
   }
 
-  async function act(fn: () => Promise<unknown>, successMessage: string) {
-    setBusy(true)
-    try {
-      await fn()
-      toast.success(successMessage)
-      reload()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
+  function act(fn: () => Promise<unknown>, successMessage: string) {
+    return actMut.run({ fn, message: successMessage })
   }
 
   /** Kiểm tra từng ô số lượng / đơn giá trước khi gọi API. */
@@ -133,36 +159,14 @@ export default function InvoiceDetail() {
     })
     if (!agreed) return
 
-    setBusy(true)
-    try {
-      const result = await api.updateInvoiceDetails(id!, {
-        details: draftLines.map((l) => ({
-          id: l.id,
-          quantity: Number(l.quantity),
-          unit_price: Number(l.unit_price),
-        })),
-        discount: Number(draftDiscount) || 0,
-      })
-
-      const parts = ['Đã cập nhật hoá đơn.']
-      if (result.synced.length) {
-        parts.push(`Đã ghi ngược ${result.synced.length} chỉ số về sổ đồng hồ.`)
-      }
-      if (result.unsynced.length) {
-        parts.push(
-          `Không đồng bộ được sổ đồng hồ cho: ${result.unsynced.join(', ')} (dòng gộp nhiều lần đọc).`,
-        )
-      }
-      toast.success(parts.join('\n'))
-
-      setEditing(false)
-      setEditErrors({})
-      reload()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
+    await saveEditsMut.run({
+      details: draftLines.map((l) => ({
+        id: l.id,
+        quantity: Number(l.quantity),
+        unit_price: Number(l.unit_price),
+      })),
+      discount: Number(draftDiscount) || 0,
+    })
   }
 
   async function cancelEditing() {

@@ -88,3 +88,21 @@ export function monthInputToPeriod(value: string): PeriodYm {
 export function periodToMonthInput(ym: PeriodYm): string {
   return `${ym.slice(0, 4)}-${ym.slice(4, 6)}`
 }
+
+/**
+ * Kỳ tương lai không có gì để xem: chưa ghi số, chưa chốt sổ, chưa hoá đơn.
+ * So sánh chuỗi 'YYYYMM' là đủ vì định dạng cố định 6 ký tự.
+ */
+export function isFuturePeriod(ym: PeriodYm): boolean {
+  return ym > currentPeriod()
+}
+
+/** Còn tiến được sang kỳ sau hay không — dùng để tắt nút ›. */
+export function canAdvancePeriod(ym: PeriodYm): boolean {
+  return !isFuturePeriod(nextPeriod(ym))
+}
+
+/** Kéo kỳ tương lai (từ URL cũ, link dán tay) về kỳ hiện tại. */
+export function clampPeriod(ym: PeriodYm): PeriodYm {
+  return isFuturePeriod(ym) ? currentPeriod() : ym
+}

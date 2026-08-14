@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { api } from '@/lib/api'
 import { useApi } from '@/lib/useApi'
+import { useMutation } from '@/lib/useMutation'
 import { money, moneyd } from '@/lib/format'
 import { ErrorBox, Field, Spinner, useToast } from '@/components/ui'
 import { useConfirm } from '@/components/confirm'
@@ -14,12 +15,13 @@ export default function Settings() {
   const toast = useToast()
   const confirm = useConfirm()
   const [values, setValues] = useState<SettingValues | null>(null)
-  const [saving, setSaving] = useState(false)
   const [errors, setErrors] = useState<Errors>({})
 
   const settings = useApi(
-    () =>
+    (isAlive) =>
       api.settings().then((res) => {
+        if (!isAlive()) return res
+
         setValues(Object.fromEntries(Object.entries(res.rows).map(([k, v]) => [k, v.value ?? ''])))
         return res
       }),
@@ -27,6 +29,18 @@ export default function Settings() {
   )
 
   const items = useApi(() => api.serviceItems(), [])
+
+  const saveMut = useMutation((v: SettingValues) => api.updateSettings(v), {
+    success: 'Đã lưu cấu hình.',
+  })
+
+  const saveItemMut = useMutation(
+    async (args: { item: ServiceItem; price: string }) => {
+      await api.updateServiceItem(args.item.id, { default_price: Number(args.price) })
+      return args.item.name
+    },
+    { success: (name) => `Đã cập nhật giá mặc định ${name}.`, onSuccess: () => items.reload() },
+  )
 
   if (settings.loading || items.loading || !values) return <Spinner />
   if (settings.error) return <ErrorBox error={settings.error} onRetry={settings.reload} />
@@ -45,15 +59,7 @@ export default function Settings() {
       return
     }
 
-    setSaving(true)
-    try {
-      await api.updateSettings(values)
-      toast.success('Đã lưu cấu hình.')
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setSaving(false)
-    }
+    await saveMut.run(values)
   }
 
   async function saveItem(item: ServiceItem, price: string) {
@@ -76,13 +82,7 @@ export default function Settings() {
     })
     if (!agreed) return
 
-    try {
-      await api.updateServiceItem(item.id, { default_price: Number(price) })
-      toast.success(`Đã cập nhật giá mặc định ${item.name}.`)
-      items.reload()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    }
+    await saveItemMut.run({ item, price })
   }
 
   return (
@@ -104,8 +104,8 @@ export default function Settings() {
           ))}
         </div>
         <div className="mt-4 flex justify-end">
-          <button className="btn-primary" onClick={save} disabled={saving}>
-            {saving ? 'Đang lưu…' : 'Lưu cấu hình'}
+          <button className="btn-primary" onClick={save} disabled={saveMut.busy}>
+            {saveMut.busy ? 'Đang lưu…' : 'Lưu cấu hình'}
           </button>
         </div>
       </div>

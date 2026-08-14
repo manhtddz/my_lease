@@ -7,7 +7,6 @@ use App\Http\Controllers\Controller;
 use App\Models\Expense;
 use App\Models\Invoice;
 use App\Models\Payment;
-use App\Models\Room;
 use App\Models\ServiceItem;
 use App\Models\Setting;
 use App\Models\Tenant;
@@ -32,21 +31,6 @@ class MiscController extends Controller
             'labels' => Code::labels(),
             'today' => Carbon::today()->toDateString(),
             'current_period' => Carbon::today()->format('Ym'),
-        ]);
-    }
-
-    public function rooms()
-    {
-        return response()->json([
-            'rows' => Room::with('building')->orderBy('building_id')->orderBy('code')->get()
-                ->map(fn (Room $r) => [
-                    'id' => $r->id,
-                    'code' => $r->code,
-                    'building_id' => $r->building_id,
-                    'building_name' => $r->building->name,
-                    'status' => $r->status,
-                    'default_rent' => $r->default_rent,
-                ]),
         ]);
     }
 

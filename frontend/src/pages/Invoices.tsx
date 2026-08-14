@@ -2,21 +2,30 @@ import { useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { useApi } from '@/lib/useApi'
-import { date, money, moneyd, monthInputToPeriod, period, periodToMonthInput } from '@/lib/format'
+import { useMutation } from '@/lib/useMutation'
+import { clampPeriod, date, money, moneyd, period } from '@/lib/format'
 import { Badge, Empty, ErrorBox, Spinner, useToast } from '@/components/ui'
+import { PeriodNav } from '@/components/PeriodNav'
 import { useConfirm } from '@/components/confirm'
 import PaymentModal from '@/components/PaymentModal'
-import { INVOICE_STATUS_LABEL, INVOICE_TONE, InvoiceStatus, type Invoice } from '@/types'
+import {
+  INVOICE_STATUS_LABEL,
+  INVOICE_TONE,
+  InvoiceStatus,
+  type Invoice,
+  type PaymentPayload,
+} from '@/types'
 
 export default function Invoices() {
   const [params, setParams] = useSearchParams()
   const toast = useToast()
   const confirm = useConfirm()
-  const [busy, setBusy] = useState(false)
   // Hoá đơn đang mở form thu tiền — null là đóng.
   const [payTarget, setPayTarget] = useState<Invoice | null>(null)
 
-  const periodFilter = params.get('period') ?? ''
+  // Kỳ tương lai chắc chắn chưa có hoá đơn — kéo về kỳ hiện tại nếu URL trỏ tới đó.
+  const rawPeriod = params.get('period') ?? ''
+  const periodFilter = rawPeriod ? clampPeriod(rawPeriod) : ''
   const statusFilter = params.get('status') ?? ''
   const roomFilter = params.get('room_id') ?? ''
 
@@ -29,6 +38,36 @@ export default function Invoices() {
       }),
     [periodFilter, statusFilter, roomFilter],
   )
+
+  const issueAllMut = useMutation((p: string) => api.issueAll(p), {
+    success: (r) => `Đã phát hành ${r.issued} hoá đơn.`,
+    onSuccess: () => reload(),
+  })
+
+  const issueOneMut = useMutation(
+    async (invoice: Invoice) => {
+      await api.issueInvoice(invoice.id)
+      return invoice.code
+    },
+    { success: (code) => `Đã phát hành ${code}.`, onSuccess: () => reload() },
+  )
+
+  const payMut = useMutation(
+    async (args: { invoice: Invoice; payload: PaymentPayload }) => {
+      await api.pay(args.invoice.id, args.payload)
+      return args
+    },
+    {
+      success: ({ invoice, payload }) => `Đã thu ${moneyd(payload.amount)} cho ${invoice.code}.`,
+      onSuccess: () => {
+        setPayTarget(null)
+        reload()
+      },
+    },
+  )
+
+  // Giữ hành vi cũ: đang phát hành hàng loạt thì khoá luôn nút phát hành từng dòng.
+  const busy = issueAllMut.busy || issueOneMut.busy
 
   function setFilter(key: string, value: string) {
     const next = new URLSearchParams(params)
@@ -62,16 +101,7 @@ export default function Invoices() {
     })
     if (!agreed) return
 
-    setBusy(true)
-    try {
-      const result = await api.issueAll(periodFilter)
-      toast.success(`Đã phát hành ${result.issued} hoá đơn.`)
-      reload()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
+    await issueAllMut.run(periodFilter)
   }
 
   async function issueOne(invoice: Invoice) {
@@ -83,16 +113,7 @@ export default function Invoices() {
     })
     if (!agreed) return
 
-    setBusy(true)
-    try {
-      await api.issueInvoice(invoice.id)
-      toast.success(`Đã phát hành ${invoice.code}.`)
-      reload()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
+    await issueOneMut.run(invoice)
   }
 
   return (
@@ -102,11 +123,10 @@ export default function Invoices() {
         <div className="flex flex-wrap items-end gap-2">
           <div>
             <label className="label">Kỳ</label>
-            <input
-              type="month"
-              className="field w-40"
-              value={periodFilter ? periodToMonthInput(periodFilter) : ''}
-              onChange={(e) => setFilter('period', monthInputToPeriod(e.target.value))}
+            <PeriodNav
+              value={periodFilter || null}
+              onChange={(p) => setFilter('period', p ?? '')}
+              allowAll
             />
           </div>
           <div>
@@ -219,14 +239,7 @@ export default function Invoices() {
         onClose={() => setPayTarget(null)}
         onSubmit={async (payload) => {
           if (!payTarget) return
-          try {
-            await api.pay(payTarget.id, payload)
-            toast.success(`Đã thu ${moneyd(payload.amount)} cho ${payTarget.code}.`)
-            setPayTarget(null)
-            reload()
-          } catch (err) {
-            toast.error(err instanceof Error ? err.message : String(err))
-          }
+          await payMut.run({ invoice: payTarget, payload })
         }}
       />
     </div>

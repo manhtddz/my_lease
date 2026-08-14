@@ -1,13 +1,26 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { useApi } from '@/lib/useApi'
-import { date, moneyd } from '@/lib/format'
-import { Badge, Empty, ErrorBox, Spinner } from '@/components/ui'
-import { CONTRACT_STATUS_LABEL, CONTRACT_TONE, ContractStatus, RoomStatus } from '@/types'
+import { useMutation } from '@/lib/useMutation'
+import { date, moneyd, todayISO } from '@/lib/format'
+import { Badge, Empty, ErrorBox, Field, Modal, Spinner, useToast } from '@/components/ui'
+import { msg } from '@/lib/messages'
+import { check, compact, hasErrors, notNegative, required, type Errors } from '@/lib/validate'
+import {
+  CONTRACT_STATUS_LABEL,
+  CONTRACT_TONE,
+  ContractStatus,
+  RoomStatus,
+  type ContractListRow,
+} from '@/types'
 
 export default function Contracts() {
   const { data, error, loading, reload } = useApi(() => api.contracts(), [])
   const roomsQuery = useApi(() => api.rooms(), [])
+
+  /** Hợp đồng đang mở form huỷ — null là đóng. */
+  const [cancelling, setCancelling] = useState<ContractListRow | null>(null)
 
   if (loading) return <Spinner />
   if (error) return <ErrorBox error={error} onRetry={reload} />
@@ -70,11 +83,26 @@ export default function Contracts() {
                     <Badge tone={CONTRACT_TONE[c.status]}>{CONTRACT_STATUS_LABEL[c.status]}</Badge>
                   </td>
                   <td className="px-3 py-2 text-right">
-                    {c.status === ContractStatus.Active && (
-                      <Link to={`/contracts/${c.id}/move-out`} className="text-xs text-sky-700 hover:underline">
-                        Trả phòng
-                      </Link>
-                    )}
+                    {c.status === ContractStatus.Active &&
+                      // Chưa tới ngày vào thì chưa ở ngày nào — không có gì để tất toán.
+                      (c.start_date <= todayISO() ? (
+                        <Link
+                          to={`/contracts/${c.id}/move-out`}
+                          className="text-xs text-sky-700 hover:underline"
+                        >
+                          Trả phòng
+                        </Link>
+                      ) : (
+                        // Chưa tới ngày vào thì không tất toán được — khách đổi ý
+                        // thì là huỷ hợp đồng, việc khác hẳn.
+                        <button
+                          className="text-xs text-rose-600 hover:underline"
+                          title={`Hợp đồng bắt đầu ${date(c.start_date)} — chưa ở ngày nào`}
+                          onClick={() => setCancelling(c)}
+                        >
+                          Huỷ hợp đồng
+                        </button>
+                      ))}
                   </td>
                 </tr>
               ))}
@@ -82,6 +110,142 @@ export default function Contracts() {
           </table>
         </div>
       )}
+
+      {cancelling && (
+        <CancelModal
+          contract={cancelling}
+          onClose={() => setCancelling(null)}
+          onDone={() => {
+            setCancelling(null)
+            reload()
+            roomsQuery.reload()
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+interface CancelModalProps {
+  contract: ContractListRow
+  onClose: () => void
+  onDone: () => void
+}
+
+type CancelField = 'deposit_deduction' | 'deduction_reason'
+
+/**
+ * Huỷ hợp đồng chưa tới ngày vào.
+ *
+ * Không dùng chung với trả phòng vì không có ngày nào đã ở: không hoá đơn,
+ * không chốt số đồng hồ — chỉ hoàn cọc và trả phòng về trống.
+ */
+function CancelModal({ contract, onClose, onDone }: CancelModalProps) {
+  const toast = useToast()
+  const held = contract.deposit_held
+
+  const [deduction, setDeduction] = useState('0')
+  const [deductionReason, setDeductionReason] = useState('')
+  const [reason, setReason] = useState('')
+  const [errors, setErrors] = useState<Errors<CancelField>>({})
+
+  const refund = Math.max(0, held - (Number(deduction) || 0))
+
+  const cancelMut = useMutation(
+    () =>
+      api.cancelContract(contract.id, {
+        deposit_deduction: Number(deduction) || 0,
+        deduction_reason: deductionReason.trim() || null,
+        refund_deposit: true,
+        reason: reason.trim() || null,
+      }),
+    { success: `Đã huỷ hợp đồng ${contract.code}.`, onSuccess: () => onDone() },
+  )
+
+  function validate(): boolean {
+    const clean = compact<CancelField>({
+      deposit_deduction: check('deduction', deduction, [required, notNegative]),
+      deduction_reason:
+        Number(deduction) > 0 ? check('deduction_reason', deductionReason, [required]) : null,
+    })
+    setErrors(clean)
+
+    if (Number(deduction) > held) {
+      setErrors({ ...clean, deposit_deduction: `Không vượt quá ${moneyd(held)} (cọc đang giữ)` })
+      toast.error(msg('formInvalid'))
+      return false
+    }
+
+    if (hasErrors(clean)) {
+      toast.error(msg('formInvalid'))
+      return false
+    }
+
+    return true
+  }
+
+  async function submit() {
+    if (!validate()) return
+    await cancelMut.run()
+  }
+
+  return (
+    <Modal open onClose={onClose} title={`Huỷ hợp đồng ${contract.code}`}>
+      <div className="space-y-3">
+        <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm">
+          <div className="font-medium text-slate-800">
+            {contract.tenant_name} · phòng {contract.room_code}
+          </div>
+          <div className="text-xs text-slate-500">
+            Ngày vào {date(contract.start_date)} — chưa tới ngày, chưa ở ngày nào.
+          </div>
+        </div>
+
+        <ul className="list-inside list-disc space-y-1 rounded-lg bg-slate-50 p-3 text-xs text-slate-600">
+          <li>Hợp đồng chuyển sang trạng thái đã huỷ, không sinh hoá đơn nào.</li>
+          <li>Mốc đồng hồ ghi lúc nhận khách sẽ được gỡ để phòng ghi số lại được.</li>
+          <li>Phòng {contract.room_code} trở về trạng thái trống, cho thuê lại được ngay.</li>
+        </ul>
+
+        <Field
+          label={`Phạt huỷ, trừ vào cọc (đang giữ ${moneyd(held)})`}
+          error={errors.deposit_deduction}
+        >
+          <input
+            className="field text-right tabular-nums"
+            inputMode="numeric"
+            value={deduction}
+            onChange={(e) => setDeduction(e.target.value)}
+          />
+        </Field>
+
+        {Number(deduction) > 0 && (
+          <Field label="Lý do phạt" error={errors.deduction_reason}>
+            <input
+              className="field"
+              value={deductionReason}
+              onChange={(e) => setDeductionReason(e.target.value)}
+            />
+          </Field>
+        )}
+
+        <Field label="Lý do huỷ" hint="Ghi vào lịch sử hợp đồng">
+          <input className="field" value={reason} onChange={(e) => setReason(e.target.value)} />
+        </Field>
+
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+          Hoàn lại khách <b className="tabular-nums">{moneyd(refund)}</b>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button className="btn-ghost" onClick={onClose} disabled={cancelMut.busy}>
+            Đóng
+          </button>
+          <button className="btn-danger" onClick={submit} disabled={cancelMut.busy}>
+            {cancelMut.busy ? 'Đang huỷ…' : 'Huỷ hợp đồng'}
+          </button>
+        </div>
+      </div>
+    </Modal>
   )
 }

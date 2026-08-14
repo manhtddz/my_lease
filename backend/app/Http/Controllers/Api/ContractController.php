@@ -176,10 +176,39 @@ class ContractController extends Controller
         return response()->json($this->tenancy->moveOutPreview($contract, $endDate));
     }
 
+    /** Huỷ hợp đồng chưa tới ngày vào — khác trả phòng, xem TenancyService::cancel(). */
+    public function cancel(Request $request, Contract $contract)
+    {
+        $data = $request->validate([
+            'deposit_deduction' => ['nullable', 'integer', 'min:0', 'max:'.$contract->depositHeld()],
+            'deduction_reason' => [
+                Rule::requiredIf(fn () => (int) $request->input('deposit_deduction', 0) > 0),
+                'nullable', 'string', 'max:500',
+            ],
+            'refund_deposit' => ['nullable', 'boolean'],
+            'refund_method' => ['nullable', 'string', 'size:1'],
+            'reason' => ['nullable', 'string', 'max:500'],
+        ], [], [
+            'deposit_deduction' => 'tiền phạt huỷ',
+            'deduction_reason' => 'lý do phạt',
+        ]);
+
+        try {
+            $cancelled = $this->tenancy->cancel($contract, $data);
+
+            return response()->json(['cancelled' => true, 'code' => $cancelled->code]);
+        } catch (RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+    }
+
     public function moveOut(Request $request, Contract $contract)
     {
         $data = $request->validate([
-            'end_date' => ['required', 'date'],
+            // Chỉ chặn ngày trả trước ngày vào. KHÔNG chặn theo kỳ đã chốt sổ:
+            // khách trả đủ tiền tới ngày 14 rồi đi ngày 14 là ca bình thường,
+            // hoá đơn tất toán khi đó bằng 0 chứ không phải lỗi.
+            'end_date' => ['required', 'date', 'after_or_equal:'.$contract->start_date->toDateString()],
             'meter_readings' => ['required', 'array', 'min:1'],
             'meter_readings.*.meter_id' => ['required', 'integer'],
             'meter_readings.*.reading' => ['required', 'numeric', 'min:0'],
@@ -196,6 +225,10 @@ class ContractController extends Controller
             'refund_deposit' => ['nullable', 'boolean'],
             'refund_method' => ['nullable', 'string', 'size:1'],
             'note' => ['nullable', 'string'],
+        ], [], [
+            // 'end_date' mặc định là "ngày hết hạn" (của hợp đồng) — ở đây nó là
+            // ngày khách thực sự dọn đi.
+            'end_date' => 'ngày trả phòng',
         ]);
 
         try {

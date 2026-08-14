@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { api } from '@/lib/api'
 import { useApi } from '@/lib/useApi'
+import { useMutation } from '@/lib/useMutation'
 import { date, money, moneyd, todayISO } from '@/lib/format'
 import { Empty, ErrorBox, Field, Modal, Spinner, useToast } from '@/components/ui'
 import { useConfirm } from '@/components/confirm'
@@ -14,6 +15,11 @@ export default function Expenses() {
   const [open, setOpen] = useState(false)
   const { data, error, loading, reload } = useApi(() => api.expenses(), [])
   const rooms = useApi(() => api.rooms(), [])
+
+  const deleteMut = useMutation((expenseId: number) => api.deleteExpense(expenseId), {
+    success: 'Đã xoá chi phí.',
+    onSuccess: () => reload(),
+  })
 
   if (loading) return <Spinner />
   if (error) return <ErrorBox error={error} onRetry={reload} />
@@ -62,7 +68,8 @@ export default function Expenses() {
                   <td className="px-3 py-2 text-right font-medium tabular-nums">{money(e.amount)}</td>
                   <td className="px-3 py-2 text-right">
                     <button
-                      className="text-xs text-rose-600 hover:underline"
+                      className="text-xs text-rose-600 hover:underline disabled:opacity-50"
+                      disabled={deleteMut.busy}
                       onClick={async () => {
                         const agreed = await confirm({
                           title: 'Xoá chi phí này?',
@@ -73,13 +80,7 @@ export default function Expenses() {
                         })
                         if (!agreed) return
 
-                        try {
-                          await api.deleteExpense(e.id)
-                          toast.success('Đã xoá chi phí.')
-                          reload()
-                        } catch (err) {
-                          toast.error(err instanceof Error ? err.message : String(err))
-                        }
+                        await deleteMut.run(e.id)
                       }}
                     >
                       xoá
@@ -163,22 +164,23 @@ function ExpenseModal({
     return true
   }
 
+  // Thông báo thành công do parent lo trong onSaved — giữ nguyên hành vi cũ.
+  const createMut = useMutation(
+    (payload: Parameters<typeof api.createExpense>[0]) => api.createExpense(payload),
+    { onSuccess: () => onSaved() },
+  )
+
   async function submit() {
     if (!validate()) return
 
-    try {
-      await api.createExpense({
-        category: form.category,
-        amount: Number(form.amount),
-        spent_at: form.spent_at,
-        room_id: form.room_id ? Number(form.room_id) : null,
-        vendor: form.vendor || null,
-        note: form.note || null,
-      })
-      onSaved()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
-    }
+    await createMut.run({
+      category: form.category,
+      amount: Number(form.amount),
+      spent_at: form.spent_at,
+      room_id: form.room_id ? Number(form.room_id) : null,
+      vendor: form.vendor || null,
+      note: form.note || null,
+    })
   }
 
   return (
@@ -247,11 +249,11 @@ function ExpenseModal({
           />
         </Field>
         <div className="flex justify-end gap-2 pt-2">
-          <button className="btn-ghost" onClick={onClose}>
+          <button className="btn-ghost" onClick={onClose} disabled={createMut.busy}>
             Huỷ
           </button>
-          <button className="btn-primary" onClick={submit}>
-            Lưu
+          <button className="btn-primary" onClick={submit} disabled={createMut.busy}>
+            {createMut.busy ? 'Đang lưu…' : 'Lưu'}
           </button>
         </div>
       </div>

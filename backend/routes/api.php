@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\MeterReadingController;
 use App\Http\Controllers\Api\MiscController;
+use App\Http\Controllers\Api\RoomController;
 use Illuminate\Support\Facades\Route;
 
 // Ứng dụng một người dùng chạy nội bộ — chưa gắn auth.
@@ -43,11 +44,18 @@ Route::get('/contracts/move-in-defaults', [ContractController::class, 'moveInDef
 Route::post('/contracts/move-in', [ContractController::class, 'moveIn']);
 Route::get('/contracts/{contract}', [ContractController::class, 'show']);
 Route::put('/contracts/{contract}/pricing', [ContractController::class, 'updatePricing']);
+Route::post('/contracts/{contract}/cancel', [ContractController::class, 'cancel']);
 Route::get('/contracts/{contract}/move-out-preview', [ContractController::class, 'moveOutPreview']);
 Route::post('/contracts/{contract}/move-out', [ContractController::class, 'moveOut']);
 
+// --- Phòng ---
+Route::get('/buildings', [RoomController::class, 'buildings']);
+Route::get('/rooms', [RoomController::class, 'index']);
+Route::post('/rooms', [RoomController::class, 'store']);
+Route::put('/rooms/{room}', [RoomController::class, 'update']);
+Route::delete('/rooms/{room}', [RoomController::class, 'destroy']);
+
 // --- Danh mục / chi phí / cấu hình / báo cáo ---
-Route::get('/rooms', [MiscController::class, 'rooms']);
 Route::get('/tenants', [MiscController::class, 'tenants']);
 Route::get('/expenses', [MiscController::class, 'expenses']);
 Route::post('/expenses', [MiscController::class, 'storeExpense']);

@@ -5,9 +5,11 @@ namespace App\Http\Controllers\Api;
 use App\Enums\Code;
 use App\Http\Controllers\Controller;
 use App\Models\Invoice;
+use App\Models\MeterReading;
 use App\Models\Setting;
 use App\Services\BillingService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 class InvoiceController extends Controller
@@ -146,8 +148,18 @@ class InvoiceController extends Controller
     {
         // Nháp thì xoá được thật; đã phát hành thì chỉ huỷ (giữ dấu vết chứng từ).
         if ($invoice->status === Code::INVOICE_DRAFT) {
-            $invoice->details()->delete();
-            $invoice->delete();
+            DB::transaction(function () use ($invoice) {
+                // Trả chỉ số về hàng chờ như nhánh huỷ. Thiếu bước này thì chỉ số
+                // kẹt ở is_billed = true vĩnh viễn: không chốt lại được mà cũng
+                // không xoá được.
+                $readingIds = $invoice->details()->whereNotNull('meter_reading_id')->pluck('meter_reading_id');
+                if ($readingIds->isNotEmpty()) {
+                    MeterReading::whereIn('id', $readingIds)->update(['is_billed' => false]);
+                }
+
+                $invoice->details()->delete();
+                $invoice->delete();
+            });
 
             return response()->json(['deleted' => true]);
         }

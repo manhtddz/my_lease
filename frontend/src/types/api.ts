@@ -7,6 +7,7 @@ import type {
   RoomStatus,
 } from './codes'
 import type {
+  Building,
   Contract,
   ContractListRow,
   ContractOccupant,
@@ -389,13 +390,33 @@ export interface MoveOutPreviewResponse {
   contract_id: number
   room_code: string
   tenant_name: string | null
+  /** Ngày vào hợp đồng — cận dưới hợp lệ của ngày trả phòng. */
+  start_date: IsoDate
+  /** Ngày bắt đầu đoạn CÒN PHẢI tính tiền, không phải cận dưới của ngày trả. */
   period_from: IsoDate
   period_to: IsoDate
   days: number
+  /** false = đã ra hoá đơn quá ngày trả, tất toán không phát sinh thêm tiền. */
+  billable: boolean
+  /** Ngày cuối đã nằm trong hoá đơn của hợp đồng; null nếu chưa có hoá đơn nào. */
+  billed_to: IsoDate | null
   rent_amount: number
   deposit_held: number
   carried_over: number
   meters: MeterSnapshot[]
+}
+
+/** Huỷ hợp đồng chưa tới ngày vào — không sinh hoá đơn, chỉ hoàn cọc. */
+export interface CancelContractPayload {
+  deposit_deduction?: number
+  deduction_reason?: string | null
+  refund_deposit?: boolean
+  reason?: string | null
+}
+
+export interface CancelContractResponse {
+  cancelled: boolean
+  code: string | null
 }
 
 export interface MoveOutPayload {
@@ -438,6 +459,27 @@ export interface SettingsResponse {
   rows: Record<string, SettingEntry>
 }
 
+// ---------------------------------------------------------------------- phòng
+
+export interface RoomPayload {
+  building_id: number
+  code: string
+  area_m2: number | null
+  default_rent: number
+  status: RoomStatus
+  note: string | null
+}
+
+/**
+ * Tạo phòng kèm đồng hồ điện + nước. Backend tự tạo hai đồng hồ; ba field dưới
+ * chỉ dùng lúc tạo, sau đó sửa đồng hồ ở màn Ghi số.
+ */
+export interface CreateRoomPayload extends RoomPayload {
+  electric_initial?: number | null
+  water_initial?: number | null
+  meter_installed_at?: IsoDate | null
+}
+
 // -------------------------------------------------------------------- báo cáo
 
 export interface MonthlyReportRow {
@@ -452,6 +494,7 @@ export interface MonthlyReportRow {
 // ------------------------------------------------------- kiểu phụ dùng lại
 
 export type RoomListResponse = Rows<Room>
+export type BuildingListResponse = Rows<Building>
 export type TenantListResponse = Rows<Tenant>
 export type InvoiceListResponse = Rows<Invoice>
 export type ContractListResponse = Rows<ContractListRow>
