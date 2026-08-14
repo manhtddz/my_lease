@@ -17,10 +17,22 @@ use Illuminate\Support\Carbon;
 
 class DatabaseSeeder extends Seeder
 {
+    /**
+     * Kỳ đầu tiên có số liệu. Cố định thay vì tính từ hôm nay để dữ liệu demo
+     * không đổi theo ngày chạy seeder — ảnh chụp lỗi và báo cáo mới so được.
+     */
+    private const FIRST_PERIOD_START = '2026-07-01';
+
     public function run(): void
     {
         $this->masterData();
         $this->demoTenancy();
+    }
+
+    /** Ngày 1 của kỳ đầu tiên có số liệu. */
+    private function firstPeriodStart(): Carbon
+    {
+        return Carbon::parse(self::FIRST_PERIOD_START)->startOfMonth();
     }
 
     /** Dữ liệu gốc: 2 toà, 6 phòng, 12 đồng hồ, 7 khoản thu, cấu hình. */
@@ -83,7 +95,8 @@ class DatabaseSeeder extends Seeder
         }
 
         // Mỗi phòng 1 đồng hồ điện + 1 đồng hồ nước.
-        $installedAt = Carbon::today()->subYear()->toDateString();
+        // Lắp trước kỳ đầu tiên một tháng để chuỗi đọc có điểm bắt đầu hợp lệ.
+        $installedAt = $this->firstPeriodStart()->subMonth()->toDateString();
         foreach (Room::all() as $room) {
             foreach ([Code::METER_ELECTRIC, Code::METER_WATER] as $type) {
                 Meter::create([
@@ -112,8 +125,11 @@ class DatabaseSeeder extends Seeder
     }
 
     /**
-     * Dữ liệu demo: 4 phòng có khách từ 3 tháng trước, kèm lịch sử ghi số +
-     * chốt sổ + thu tiền để dashboard và báo cáo có số liệu thật.
+     * Dữ liệu demo: 4 phòng có khách từ đầu kỳ FIRST_PERIOD_START, kèm lịch sử
+     * ghi số + chốt sổ + thu tiền để dashboard và báo cáo có số liệu thật.
+     *
+     * Chốt sổ chạy cho mọi kỳ từ kỳ đầu tiên tới kỳ trước kỳ hiện tại; kỳ hiện
+     * tại để trống để còn chỗ thao tác ghi số / chốt sổ.
      *
      * Dùng đúng TenancyService / MeterReadingService / BillingService để dữ liệu
      * demo đi qua cùng đường với dữ liệu thật — không INSERT tắt.
@@ -132,7 +148,7 @@ class DatabaseSeeder extends Seeder
         $garbage = ServiceItem::where('code', 'garbage')->first();
         $parking = ServiceItem::where('code', 'parking')->first();
 
-        $start = Carbon::today()->subMonths(3)->startOfMonth();
+        $start = $this->firstPeriodStart();
         $startDate = $start->toDateString();
 
         // [phòng, tên, sđt, giá thuê, cọc, số người, chỉ số điện đầu, nước đầu, kWh/tháng, m3/tháng]
@@ -185,7 +201,8 @@ class DatabaseSeeder extends Seeder
             ]);
         }
 
-        // --- Lịch sử: ghi số + chốt sổ + thu tiền cho 2 kỳ đã qua ---
+        // --- Lịch sử: ghi số + chốt sổ + thu tiền cho các kỳ đã qua ---
+        // Kỳ hiện tại KHÔNG chốt — để người dùng còn thao tác trên dữ liệu mới.
         $currentPeriod = Carbon::today()->format('Ym');
         $cursor = $start->copy();
         $monthIndex = 0;
